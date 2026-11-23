@@ -1,0 +1,22 @@
+version: 2
+
+project_name: ai-warehouse
+
+builds:
+  - id: aiwarehouse
+    main: ./cmd/aiwarehouse
+    binary: aiw
+    env: [CGO_ENABLED=0]
+    goos: [linux, windows, darwin]
+    goarch: [amd64, arm64]
+
+archives:
+  - formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Os }}_{{ .Arch }}
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+changelog:
+  use: github

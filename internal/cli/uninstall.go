@@ -2,10 +2,10 @@ package cli
 
 import (
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/KotovN/ai-warehouse/internal/config"
 	"github.com/KotovN/ai-warehouse/internal/tool"
@@ -15,7 +15,7 @@ import (
 // runUninstall removes only aiw-managed resources recorded in state.json;
 // user-created content (blocks, extra files) is preserved.
 func runUninstall(cmd *cobra.Command, dryRun bool) error {
-	part, root, err := projectPartition()
+	part, root, _, err := activeInstall()
 	if err != nil {
 		return err
 	}
@@ -23,8 +23,9 @@ func runUninstall(cmd *cobra.Command, dryRun bool) error {
 	if err != nil {
 		return err
 	}
+	out := cmd.OutOrStdout()
 	if len(st.Managed) == 0 {
-		fmt.Println("nothing managed to remove")
+		fmt.Fprintln(out, "nothing managed to remove")
 		return nil
 	}
 	prefix := ""
@@ -37,71 +38,72 @@ func runUninstall(cmd *cobra.Command, dryRun bool) error {
 	}
 	sort.Strings(ids)
 	removed := 0
+	var removedPaths []string
+	remaining := map[string][]config.ManagedEntry{}
+	var hadErr error
 	for _, id := range ids {
 		for _, e := range st.Managed[id] {
-			done, err := undoManaged(e, dryRun)
+			done, err := tool.UndoManaged(e, dryRun)
 			if err != nil {
-				fmt.Printf("%s%s (%s): %v\n", prefix, e.Path, e.Kind, err)
+				fmt.Fprintf(out, "%s%s (%s): %v\n", prefix, e.Path, e.Kind, err)
+				remaining[id] = append(remaining[id], e)
+				hadErr = err
 				continue
 			}
 			if done {
-				fmt.Printf("%s%s (%s, %s)\n", prefix, e.Path, e.Kind, id)
+				fmt.Fprintf(out, "%s%s (%s, %s)\n", prefix, e.Path, e.Kind, id)
 				removed++
+				removedPaths = append(removedPaths, e.Path)
 			}
 		}
 	}
 	if dryRun {
-		fmt.Printf("dry run — nothing changed (%d managed entries)\n", len(st.Managed))
+		fmt.Fprintf(out, "dry run — nothing changed (%d managed entries)\n", removed)
 		return nil
 	}
-	st.Managed = nil
+	if len(remaining) == 0 {
+		st.Managed = nil
+	} else {
+		st.Managed = remaining
+	}
 	if err := config.SaveState(part.State, st); err != nil {
 		return err
 	}
-	pruneEmptyToolDirs(root)
-	fmt.Printf("removed %d managed entries; run aiwarehouse pull to re-sync\n", removed)
-	return nil
+	pruneEmptyParents(root, removedPaths, out)
+	fmt.Fprintf(out, "removed %d managed entries; run aiw pull to re-sync\n", removed)
+	return hadErr
 }
 
-// pruneEmptyToolDirs removes empty subdirectories inside the known tool dirs.
-func pruneEmptyToolDirs(root string) {
-	for _, dir := range []string{".cursor", ".codex", ".vscode", ".opencode"} {
-		base := filepath.Join(root, dir)
-		var dirs []string
-		filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
-			if err == nil && d.IsDir() && path != base {
-				dirs = append(dirs, path)
+// pruneEmptyParents removes empty directories created under root for removed managed files,
+// stopping before root itself so user/project root directories are never touched.
+func pruneEmptyParents(root string, paths []string, out interface{ Write([]byte) (int, error) }) {
+	cleanRoot := filepath.Clean(root)
+	seen := map[string]bool{}
+	var dirs []string
+	for _, p := range paths {
+		for dir := filepath.Dir(filepath.Clean(p)); dir != cleanRoot && isUnder(dir, cleanRoot); dir = filepath.Dir(dir) {
+			if seen[dir] {
+				break
 			}
-			return nil
-		})
-		sort.Slice(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) }) // deepest first
-		for _, d := range dirs {
-			if os.Remove(d) == nil { // Remove fails on non-empty dirs, which is what we want
-				fmt.Println("removed empty dir", d)
-			}
+			seen[dir] = true
+			dirs = append(dirs, dir)
+		}
+	}
+	// Deepest directories first so child removal enables parent removal.
+	sort.Slice(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
+	for _, d := range dirs {
+		// Keep top-level tool roots (direct children of root) only if non-empty;
+		// os.Remove naturally fails on non-empty directories.
+		if os.Remove(d) == nil {
+			fmt.Fprintln(out, "removed empty dir", d)
 		}
 	}
 }
 
-// undoManaged removes one managed entry; reports whether it acted.
-func undoManaged(e config.ManagedEntry, dryRun bool) (bool, error) {
-	if _, err := os.Stat(e.Path); os.IsNotExist(err) {
-		return false, nil // already gone
+func isUnder(path, root string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
 	}
-	if dryRun {
-		return true, nil
-	}
-	switch e.Kind {
-	case "file":
-		return true, os.RemoveAll(e.Path)
-	case "block":
-		_, err := tool.StripBlock(e.Path)
-		return true, err
-	case "hook":
-		return true, tool.RemoveHookEntry(e.Path)
-	case "mcp":
-		return true, tool.RemoveServerKey(e.Path, e.Key)
-	default:
-		return false, fmt.Errorf("unknown kind %q", e.Kind)
-	}
+	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }

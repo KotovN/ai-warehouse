@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 
@@ -57,6 +58,9 @@ func (g *GitHub) CreateRepo(name string, private bool) (string, error) {
 }
 
 func (g *GitHub) OpenPR(branch, title string, reviewers []string) (string, error) {
+	if g.token == "" {
+		return "", errors.New("GitHub token required: set GITHUB_TOKEN or GH_TOKEN")
+	}
 	ctx := context.Background()
 	base, err := g.defaultBranch(ctx)
 	if err != nil {
@@ -75,27 +79,39 @@ func (g *GitHub) OpenPR(branch, title string, reviewers []string) (string, error
 			Reviewers: reviewers,
 		})
 		if err != nil {
-			return pr.GetHTMLURL(), err
+			return pr.GetHTMLURL(), fmt.Errorf("request reviewers: %w", err)
 		}
 	}
 	return pr.GetHTMLURL(), nil
 }
 
 func (g *GitHub) ListOpenPRs() ([]PR, error) {
-	opts := &github.PullRequestListOptions{State: "open", ListOptions: github.ListOptions{PerPage: 50}}
-	ghprs, _, err := g.api.PullRequests.List(context.Background(), g.owner, g.name, opts)
-	if err != nil {
-		return nil, err
+	if g.token == "" {
+		return nil, errors.New("GitHub token required: set GITHUB_TOKEN or GH_TOKEN")
+	}
+	opts := &github.PullRequestListOptions{
+		State:       "open",
+		ListOptions: github.ListOptions{PerPage: 100},
 	}
 	var prs []PR
-	for _, p := range ghprs {
-		prs = append(prs, PR{
-			Number: p.GetNumber(),
-			Author: p.GetUser().GetLogin(),
-			Head:   p.GetHead().GetRef(),
-			Title:  p.GetTitle(),
-			URL:    p.GetHTMLURL(),
-		})
+	for {
+		ghprs, resp, err := g.api.PullRequests.List(context.Background(), g.owner, g.name, opts)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range ghprs {
+			prs = append(prs, PR{
+				Number: p.GetNumber(),
+				Author: p.GetUser().GetLogin(),
+				Head:   p.GetHead().GetRef(),
+				Title:  p.GetTitle(),
+				URL:    p.GetHTMLURL(),
+			})
+		}
+		if resp == nil || resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
 	}
 	return prs, nil
 }

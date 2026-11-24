@@ -1,0 +1,22 @@
+id: opencode
+detect:
+  - .opencode
+  - ~/.config/opencode
+project:
+  skills: .opencode/skills
+  rules:
+    mode: block
+    path: AGENTS.md
+  mcp:
+    path: opencode.json
+    format: json-opencode
+    key: mcp
+user:
+  skills: ~/.config/opencode/skills
+  rules:
+    mode: block
+    path: ~/.config/opencode/AGENTS.md
+  mcp:
+    path: ~/.config/opencode/opencode.json
+    format: json-opencode
+    key: mcp

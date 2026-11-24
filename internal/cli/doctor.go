@@ -12,31 +12,26 @@ import (
 
 // runDoctor prints diagnostic checks; exits non-zero when any check fails.
 func runDoctor(cmd *cobra.Command, asJSON bool) error {
-	part, root, _ := projectPartition()
-	cfg, err := config.Load(part.Config)
-	if err != nil {
-		cfg = config.LocalConfig{}
-	}
+	part, root, cfg, _ := activeInstall()
 	checks := doctor.Run(root, cfg, part)
+	out := cmd.OutOrStdout()
 	if asJSON {
 		b, err := json.MarshalIndent(checks, "", "  ")
 		if err != nil {
 			return err
 		}
-		fmt.Println(string(b))
+		fmt.Fprintln(out, string(b))
 	} else {
 		for _, c := range checks {
 			mark := "ok  "
 			if !c.OK {
 				mark = "FAIL"
 			}
-			fmt.Printf("%-20s %s  %s\n", c.Name, mark, c.Detail)
+			fmt.Fprintf(out, "%-20s %s  %s\n", c.Name, mark, c.Detail)
 		}
 	}
-	for _, c := range checks {
-		if !c.OK {
-			return fmt.Errorf("doctor found %d failing check(s)", countFailed(checks))
-		}
+	if failed := countFailed(checks); failed > 0 {
+		return fmt.Errorf("doctor found %d failing check(s)", failed)
 	}
 	return nil
 }
@@ -53,26 +48,30 @@ func countFailed(checks []doctor.Check) int {
 
 // runStatus shows local vs hub diff and sync state.
 func runStatus(cmd *cobra.Command) error {
-	part, root, err := projectPartition()
+	part, root, cfg, err := activeInstall()
 	if err != nil {
 		return err
 	}
-	cfg, err := config.Load(part.Config)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("hub:       %s\n", cfg.Repo)
-	fmt.Printf("tools:     %v\n", orAuto(cfg.Tools))
+	out := cmd.OutOrStdout()
+	fmt.Fprintf(out, "hub:       %s\n", cfg.Repo)
+	fmt.Fprintf(out, "scope:     %s (%s)\n", or(cfg.Scope, "project"), root)
+	fmt.Fprintf(out, "tools:     %v\n", orAuto(cfg.Tools))
 	if st, err := config.LoadState(part.State); err == nil {
-		fmt.Printf("last pull: %s (hub @ %.8s)\n", or(st.LastPull, "never"), st.Revision)
-		checks := doctor.Run(root, cfg, part)
-		fmt.Printf("doctor:    %d/%d checks ok\n", len(checks)-countFailed(checks), len(checks))
+		rev := or(st.Revision, "none")
+		if len(rev) > 8 {
+			rev = rev[:8]
+		}
+		fmt.Fprintf(out, "last pull: %s (hub @ %s)\n", or(st.LastPull, "never"), rev)
+	} else {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: unable to read state.json: %v\n", err)
 	}
-	added, edited, err := hub.DiffLocal(root, part.Repo)
+	checks := doctor.Run(root, cfg, part)
+	fmt.Fprintf(out, "doctor:    %d/%d checks ok\n", len(checks)-countFailed(checks), len(checks))
+	added, edited, err := hub.DiffLocalScope(root, cfg.Scope, part.Repo)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("to share:  %d added, %d edited (aiw push --dry-run for details)\n", len(added), len(edited))
+	fmt.Fprintf(out, "to share:  %d added, %d edited (aiw push --dry-run for details)\n", len(added), len(edited))
 	return nil
 }
 

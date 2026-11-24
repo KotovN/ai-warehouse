@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -18,6 +19,7 @@ import (
 // Syncer pulls hub resources into the AI tools chosen for this machine.
 type Syncer struct {
 	Root      string           // install root: project dir (project scope) or home (user scope)
+	Scope     string           // "project" | "user" (defaults to "project")
 	RepoPath  string           // hub clone path
 	Partition config.Partition // machine-data partition holding state.json
 	Tools     []string
@@ -27,26 +29,59 @@ type Syncer struct {
 type Report struct {
 	Installed   []string
 	Skipped     []string
+	Pruned      int
 	MissingClis []string
+	CliDetails  []CliStatus
+	Warnings    []string
 }
 
-// Pull installs resources into every detected, enabled tool.
+// Pull installs resources into every detected (or explicitly requested) tool
+// and prunes previously managed entries that were deleted from the hub.
 func (s Syncer) Pull(dryRun bool) (Report, error) {
+	report := Report{}
 	// Best-effort refresh of the hub clone: an offline machine still pulls
-	// from its last synced revision.
+	// from its last synced revision, while reporting refresh failures as warnings.
 	if !dryRun {
-		_ = provider.UpdateClone(s.RepoPath)
+		if _, err := os.Stat(filepath.Join(s.RepoPath, ".git")); err == nil {
+			if err := provider.UpdateClone(s.RepoPath); err != nil {
+				report.Warnings = append(report.Warnings, fmt.Sprintf("hub refresh failed (using cached clone): %v", err))
+			}
+		}
 	}
 	res, err := BuildResources(s.RepoPath)
 	if err != nil {
-		return Report{}, err
+		return report, err
 	}
-	report := Report{MissingClis: CheckClis(res.Clis)}
-	for _, a := range tool.All(s.Root) {
+	scope := s.Scope
+	if scope == "" {
+		scope = "project"
+	}
+	adapters, err := tool.LoadAdapters(s.Root, scope, tool.DefaultExtraDirs(s.RepoPath)...)
+	if err != nil {
+		return report, err
+	}
+	report.CliDetails = InspectClis(res.Clis, runtime.GOOS)
+	for _, c := range report.CliDetails {
+		if !c.Installed {
+			report.MissingClis = append(report.MissingClis, c.Name)
+		}
+	}
+
+	st, err := config.LoadState(s.statePath())
+	if err != nil {
+		return report, err
+	}
+	if st.Managed == nil {
+		st.Managed = map[string][]config.ManagedEntry{}
+	}
+
+	explicit := len(s.Tools) > 0
+	for _, a := range adapters {
 		if !s.wants(a.ID()) {
 			continue
 		}
-		if !a.Detect() {
+		// Only require auto-detection when the user didn't explicitly pick tools.
+		if !explicit && !a.Detect() {
 			report.Skipped = append(report.Skipped, a.ID())
 			continue
 		}
@@ -56,23 +91,33 @@ func (s Syncer) Pull(dryRun bool) (Report, error) {
 		}
 		managed, err := a.Install(res)
 		if err != nil {
+			if len(managed) > 0 {
+				st.Managed[a.ID()] = mergeManaged(st.Managed[a.ID()], managed)
+				_ = config.SaveState(s.statePath(), st)
+			}
 			return report, fmt.Errorf("%s install: %w", a.ID(), err)
 		}
-		hooks, err := a.InjectHooks()
-		if err != nil {
-			return report, fmt.Errorf("%s hooks: %w", a.ID(), err)
+		if res.Warehouse.AutoPullEnabled() {
+			hooks, err := a.InjectHooks()
+			if err != nil {
+				st.Managed[a.ID()] = mergeManaged(st.Managed[a.ID()], managed)
+				_ = config.SaveState(s.statePath(), st)
+				return report, fmt.Errorf("%s hooks: %w", a.ID(), err)
+			}
+			managed = append(managed, hooks...)
 		}
+
+		// Prune any previously managed entries for this adapter that are no
+		// longer part of the hub's desired state.
+		pruned, pruneWarns := pruneStale(st.Managed[a.ID()], managed)
+		report.Pruned += pruned
+		report.Warnings = append(report.Warnings, pruneWarns...)
+
+		st.Managed[a.ID()] = managed
 		report.Installed = append(report.Installed, a.ID())
-		if err := s.recordManaged(a.ID(), append(managed, hooks...)); err != nil {
-			return report, err
-		}
 	}
 	if dryRun {
-		return Report{Installed: report.Installed, Skipped: report.Skipped, MissingClis: report.MissingClis}, nil
-	}
-	st, err := config.LoadState(s.statePath())
-	if err != nil {
-		return report, err
+		return report, nil
 	}
 	st.LastPull = time.Now().Format(time.RFC3339)
 	st.Revision = revision(s.RepoPath)
@@ -82,17 +127,45 @@ func (s Syncer) Pull(dryRun bool) (Report, error) {
 	return report, nil
 }
 
-// recordManaged merges this pull's managed entries into state.json.
-func (s Syncer) recordManaged(id string, entries []config.ManagedEntry) error {
-	st, err := config.LoadState(s.statePath())
-	if err != nil {
-		return err
+func pruneStale(prev, current []config.ManagedEntry) (int, []string) {
+	keep := make(map[config.ManagedEntry]bool, len(current))
+	for _, e := range current {
+		keep[e] = true
 	}
-	if st.Managed == nil {
-		st.Managed = map[string][]config.ManagedEntry{}
+	pruned := 0
+	var warnings []string
+	for _, old := range prev {
+		if keep[old] {
+			continue
+		}
+		acted, err := tool.UndoManaged(old, false)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("prune %s (%s): %v", old.Path, old.Kind, err))
+			continue
+		}
+		if acted {
+			pruned++
+		}
 	}
-	st.Managed[id] = entries
-	return config.SaveState(s.statePath(), st)
+	return pruned, warnings
+}
+
+func mergeManaged(existing, added []config.ManagedEntry) []config.ManagedEntry {
+	seen := make(map[config.ManagedEntry]bool, len(existing)+len(added))
+	out := make([]config.ManagedEntry, 0, len(existing)+len(added))
+	for _, e := range existing {
+		if !seen[e] {
+			seen[e] = true
+			out = append(out, e)
+		}
+	}
+	for _, e := range added {
+		if !seen[e] {
+			seen[e] = true
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 func (s Syncer) statePath() string {
@@ -104,7 +177,7 @@ func (s Syncer) wants(id string) bool {
 		return true
 	}
 	for _, t := range s.Tools {
-		if t == id {
+		if strings.EqualFold(strings.TrimSpace(t), id) {
 			return true
 		}
 	}
@@ -112,8 +185,6 @@ func (s Syncer) wants(id string) bool {
 }
 
 func revision(repoPath string) string {
-	// Keep hub dependency-free: read HEAD via git plumbing through go-git
-	// would add an import here; shell out once per pull instead.
 	out, err := exec.Command("git", "-C", repoPath, "rev-parse", "HEAD").Output()
 	if err != nil {
 		return ""
@@ -121,12 +192,21 @@ func revision(repoPath string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// BuildResources reads skills, rules, mcp, hooks and clis from the hub clone.
+// BuildResources reads warehouse config, skills, rules, mcp, hooks and clis
+// from the hub clone. Missing optional files are ignored, while YAML syntax
+// or read errors are returned.
 func BuildResources(repoPath string) (tool.Resources, error) {
 	res := tool.Resources{}
+	if w, err := config.LoadWarehouse(repoPath); err == nil {
+		res.Warehouse = w
+	} else if !os.IsNotExist(err) {
+		return res, fmt.Errorf("warehouse.yaml: %w", err)
+	}
 	for _, name := range config.SkillDirs(repoPath) {
 		res.Skills = append(res.Skills, tool.Skill{Name: name, Dir: filepath.Join(repoPath, "skills", name)})
 	}
+	sort.Slice(res.Skills, func(i, j int) bool { return res.Skills[i].Name < res.Skills[j].Name })
+
 	ruleFiles, err := os.ReadDir(filepath.Join(repoPath, "rules"))
 	if err == nil {
 		for _, e := range ruleFiles {
@@ -139,35 +219,25 @@ func BuildResources(repoPath string) (tool.Resources, error) {
 			}
 			res.Rules = append(res.Rules, tool.Rule{Name: strings.TrimSuffix(e.Name(), ".md"), Content: string(b)})
 		}
+	} else if !os.IsNotExist(err) {
+		return res, fmt.Errorf("read rules: %w", err)
 	}
 	sort.Slice(res.Rules, func(i, j int) bool { return res.Rules[i].Name < res.Rules[j].Name })
-	res.MCP, _ = config.LoadMCP(repoPath) // missing file = no servers
-	res.Hooks, _ = config.LoadHooks(repoPath)
-	res.Clis, _ = config.LoadClis(repoPath)
+
+	if m, err := config.LoadMCP(repoPath); err == nil {
+		res.MCP = m
+	} else if !os.IsNotExist(err) {
+		return res, fmt.Errorf("mcp/mcp.yaml: %w", err)
+	}
+	if h, err := config.LoadHooks(repoPath); err == nil {
+		res.Hooks = h
+	} else if !os.IsNotExist(err) {
+		return res, fmt.Errorf("hooks/hooks.yaml: %w", err)
+	}
+	if c, err := config.LoadClis(repoPath); err == nil {
+		res.Clis = c
+	} else if !os.IsNotExist(err) {
+		return res, fmt.Errorf("clis/clis.yaml: %w", err)
+	}
 	return res, nil
-}
-
-// CheckClis runs each registered CLI's check command, returning names not found.
-func CheckClis(clis config.ClisFile) []string {
-	var missing []string
-	for _, name := range sortedKeys(clis.Clis) {
-		check := clis.Clis[name].Check
-		if check == "" {
-			continue
-		}
-		fields := strings.Fields(check)
-		if err := exec.Command(fields[0], fields[1:]...).Run(); err != nil {
-			missing = append(missing, name)
-		}
-	}
-	return missing
-}
-
-func sortedKeys(m map[string]config.CliTool) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }

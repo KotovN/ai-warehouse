@@ -4,8 +4,10 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Partition holds the paths of one project's machine-data directory.
@@ -26,10 +28,20 @@ func Home() string {
 	return filepath.Join(h, ".ai-warehouse")
 }
 
+// UserToolsDir returns the directory for user-defined custom tool specs (~/.ai-warehouse/tools).
+func UserToolsDir() string {
+	return filepath.Join(Home(), "tools")
+}
+
 // ProjectSlug derives a stable partition directory name from a project root.
 func ProjectSlug(projectRoot string) string {
-	h := sha1.Sum([]byte(projectRoot))
-	return fmt.Sprintf("%s-%s", filepath.Base(projectRoot), hex.EncodeToString(h[:4]))
+	clean := filepath.Clean(projectRoot)
+	h := sha1.Sum([]byte(clean))
+	base := filepath.Base(clean)
+	if base == "" || base == "." || base == string(filepath.Separator) || base == "/" || strings.ContainsAny(base, `/\:`) {
+		base = "root"
+	}
+	return fmt.Sprintf("%s-%s", base, hex.EncodeToString(h[:4]))
 }
 
 // PartitionFor computes (but does not create) the partition paths for a project root.
@@ -47,4 +59,24 @@ func PartitionFor(projectRoot string) Partition {
 // Ensure creates the partition directory (the clone dir is created on demand).
 func (p Partition) Ensure() error {
 	return os.MkdirAll(p.Root, 0o755)
+}
+
+// RemoveAll deletes path and any children, clearing read-only bits first so
+// directories containing git object/pack files (0444) remove cleanly on Windows.
+func RemoveAll(path string) error {
+	if _, err := os.Lstat(path); os.IsNotExist(err) {
+		return nil
+	}
+	_ = filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			_ = os.Chmod(p, 0o755)
+		} else {
+			_ = os.Chmod(p, 0o644)
+		}
+		return nil
+	})
+	return os.RemoveAll(path)
 }

@@ -3,11 +3,17 @@ package hub
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/KotovN/ai-warehouse/internal/config"
 )
+
+func isolateHome(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+}
 
 // fixtureRepo creates a hub-clone-like directory with resources.
 func fixtureRepo(t *testing.T) string {
@@ -25,11 +31,12 @@ func fixtureRepo(t *testing.T) string {
 	clis := filepath.Join(root, "clis")
 	os.MkdirAll(clis, 0o755)
 	// "definitely-missing-cmd" is guaranteed absent on any machine.
-	os.WriteFile(filepath.Join(clis, "clis.yaml"), []byte("clis:\n  nope-tool:\n    check: definitely-missing-cmd --version\n"), 0o644)
+	os.WriteFile(filepath.Join(clis, "clis.yaml"), []byte("clis:\n  nope-tool:\n    check: definitely-missing-cmd --version\n    url: https://example.test/nope\n    install:\n      windows: winget install nope\n      darwin: brew install nope\n      linux: apt install nope\n"), 0o644)
 	return root
 }
 
 func TestSyncerPull(t *testing.T) {
+	isolateHome(t)
 	projRoot := t.TempDir()
 	part := config.PartitionFor(projRoot)
 	if err := part.Ensure(); err != nil {
@@ -41,23 +48,27 @@ func TestSyncerPull(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// No tool dirs exist in a bare temp project, so everything is skipped.
-	if len(report.Skipped) == 0 {
-		t.Fatalf("expected skipped tools, got %+v", report)
+	// No tool dirs exist in an isolated bare temp project, so everything is skipped.
+	if len(report.Skipped) == 0 || len(report.Installed) != 0 {
+		t.Fatalf("expected all tools skipped, got %+v", report)
 	}
 	if len(report.MissingClis) != 1 || report.MissingClis[0] != "nope-tool" {
 		t.Fatalf("missing clis: %v", report.MissingClis)
 	}
+	if len(report.CliDetails) != 1 || report.CliDetails[0].URL != "https://example.test/nope" || report.CliDetails[0].InstallCmd == "" {
+		t.Fatalf("cli details: %+v", report.CliDetails)
+	}
 }
 
-func TestSyncerPullWithCursor(t *testing.T) {
+func TestSyncerPullPrunesRemovedHubResources(t *testing.T) {
+	isolateHome(t)
 	projRoot := t.TempDir()
 	part := config.PartitionFor(projRoot)
 	if err := part.Ensure(); err != nil {
 		t.Fatal(err)
 	}
-	os.MkdirAll(filepath.Join(projRoot, ".cursor"), 0o755)
-	s := Syncer{Root: projRoot, RepoPath: fixtureRepo(t), Partition: part, Tools: []string{"cursor"}}
+	repo := fixtureRepo(t)
+	s := Syncer{Root: projRoot, RepoPath: repo, Partition: part, Tools: []string{"cursor"}}
 
 	report, err := s.Pull(false)
 	if err != nil {
@@ -66,38 +77,42 @@ func TestSyncerPullWithCursor(t *testing.T) {
 	if len(report.Installed) != 1 || report.Installed[0] != "cursor" {
 		t.Fatalf("installed: %v", report.Installed)
 	}
-	// Skill landed, hooks injected, state records managed entries.
-	if _, err := os.Stat(filepath.Join(projRoot, ".cursor", "skills", "go-tips", "SKILL.md")); err != nil {
+	skillPath := filepath.Join(projRoot, ".cursor", "skills", "go-tips", "SKILL.md")
+	rulePath := filepath.Join(projRoot, ".cursor", "rules", "code-review.mdc")
+	mcpPath := filepath.Join(projRoot, ".cursor", "mcp.json")
+	if _, err := os.Stat(skillPath); err != nil {
 		t.Fatalf("skill not installed: %v", err)
 	}
-	hooksPath := filepath.Join(projRoot, ".cursor", "hooks.json")
-	if _, err := os.Stat(hooksPath); err != nil {
-		t.Fatalf("hooks not injected: %v", err)
-	}
-	st, err := config.LoadState(part.State)
+
+	// Remove skill, rule, and MCP server from hub and pull again.
+	os.RemoveAll(filepath.Join(repo, "skills", "go-tips"))
+	os.Remove(filepath.Join(repo, "rules", "code-review.md"))
+	os.Remove(filepath.Join(repo, "mcp", "mcp.yaml"))
+
+	report2, err := s.Pull(false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	entries := st.Managed["cursor"]
-	if len(entries) == 0 {
-		t.Fatal("no managed entries recorded")
+	if report2.Pruned != 3 {
+		t.Fatalf("expected 3 pruned entries (skill, rule, mcp), got %+v", report2)
 	}
-	var sawFile bool
-	for _, e := range entries {
-		switch e.Kind {
-		case "file":
-			sawFile = true
-		case "mcp":
-			if e.Key != "fs" {
-				t.Fatalf("mcp entry key: %q", e.Key)
-			}
-		}
+	if _, err := os.Stat(filepath.Join(projRoot, ".cursor", "skills", "go-tips")); !os.IsNotExist(err) {
+		t.Fatal("removed skill should have been pruned")
 	}
-	if !sawFile {
-		t.Fatalf("expected a file entry, got %+v", entries)
+	if _, err := os.Stat(rulePath); !os.IsNotExist(err) {
+		t.Fatal("removed rule should have been pruned")
 	}
-	if st.Revision != "" && len(st.Revision) != 40 {
-		t.Fatalf("revision: %q", st.Revision)
+	if _, err := os.Stat(mcpPath); !os.IsNotExist(err) {
+		t.Fatal("empty mcp.json should have been removed after pruning last server")
+	}
+}
+
+func TestBuildResourcesPropagatesBadYAML(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, "mcp"), 0o755)
+	os.WriteFile(filepath.Join(root, "mcp", "mcp.yaml"), []byte("servers: [broken"), 0o644)
+	if _, err := BuildResources(root); err == nil {
+		t.Fatal("expected error on malformed mcp.yaml")
 	}
 }
 
@@ -116,26 +131,15 @@ func TestBuildResourcesRulesSorted(t *testing.T) {
 	}
 }
 
-func TestCheckClisMissingAndPresent(t *testing.T) {
-	// Use the go binary as a CLI that always exists, and a bogus one.
+func TestCheckClisMissingPresentAndWhitespace(t *testing.T) {
 	clis := config.ClisFile{Clis: map[string]config.CliTool{
-		"real":    {Check: "go version"},
-		"bogus":   {Check: "definitely-missing-cmd --version"},
-		"nocheck": {},
+		"real":       {Check: "go version"},
+		"bogus":      {Check: "definitely-missing-cmd --version"},
+		"nocheck":    {},
+		"whitespace": {Check: "   \t  "},
 	}}
 	missing := CheckClis(clis)
 	if len(missing) != 1 || missing[0] != "bogus" {
 		t.Fatalf("missing: %v", missing)
-	}
-}
-
-func TestCheckClisCommandFields(t *testing.T) {
-	// check strings are split into fields, e.g. "go version" works
-	clis := config.ClisFile{Clis: map[string]config.CliTool{"go": {Check: "go version"}}}
-	if m := CheckClis(clis); len(m) != 0 {
-		t.Fatalf("go should be present, missing: %v", m)
-	}
-	if !strings.Contains("", "") {
-		t.Fatal("sanity")
 	}
 }

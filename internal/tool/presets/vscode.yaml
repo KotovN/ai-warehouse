@@ -1,0 +1,12 @@
+id: vscode
+detect:
+  - .vscode
+  - ~/.vscode
+project:
+  rules:
+    mode: block
+    path: .github/copilot-instructions.md
+  mcp:
+    path: .vscode/mcp.json
+    format: json-standard
+    key: servers

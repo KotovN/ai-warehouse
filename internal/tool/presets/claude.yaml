@@ -1,0 +1,32 @@
+id: claude
+detect:
+  - .claude
+  - ~/.claude
+project:
+  skills: .claude/skills
+  rules:
+    mode: block
+    path: CLAUDE.md
+  mcp:
+    path: .mcp.json
+    format: json-standard
+    key: mcpServers
+  hooks:
+    path: .claude/settings.json
+    key: hooks
+    event: SessionStart
+    style: nested
+user:
+  skills: ~/.claude/skills
+  rules:
+    mode: block
+    path: ~/.claude/CLAUDE.md
+  mcp:
+    path: ~/.claude.json
+    format: json-standard
+    key: mcpServers
+  hooks:
+    path: ~/.claude/settings.json
+    key: hooks
+    event: SessionStart
+    style: nested

@@ -15,6 +15,7 @@ type LocalConfig struct {
 	Scope       string   `yaml:"scope"` // project | user
 	ProjectRoot string   `yaml:"projectRoot,omitempty"`
 	Tools       []string `yaml:"tools,omitempty"`
+	Ignore      []string `yaml:"ignore,omitempty"` // canonical selectors: skill:<n>, rule:<n>, mcp:<n>, cli:<n>
 }
 
 // State is mutable sync state for a project partition.
@@ -26,10 +27,11 @@ type State struct {
 
 // ManagedEntry is one path an adapter owns, and how to undo it on uninstall or prune.
 type ManagedEntry struct {
-	Path    string `json:"path" yaml:"path"`
-	Kind    string `json:"kind" yaml:"kind"`                           // file | block | mcp | hook
-	Key     string `json:"key,omitempty" yaml:"key,omitempty"`         // for mcp: server name; for hook: event name
-	Section string `json:"section,omitempty" yaml:"section,omitempty"` // optional container key (e.g. mcpServers, hooks)
+	Path     string `json:"path" yaml:"path"`
+	Kind     string `json:"kind" yaml:"kind"`                               // file | block | mcp | hook
+	Key      string `json:"key,omitempty" yaml:"key,omitempty"`             // for mcp: server name; for hook: event name
+	Section  string `json:"section,omitempty" yaml:"section,omitempty"`     // optional container key (e.g. mcpServers, hooks)
+	Resource string `json:"resource,omitempty" yaml:"resource,omitempty"`   // canonical id: skill:<n>, rule:<n>, mcp:<n>, rules, hook:<ev>
 }
 
 // SaveState writes state.json as formatted JSON.

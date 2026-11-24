@@ -120,11 +120,12 @@ func (c CliInstall) MarshalYAML() (any, error) {
 	return nil, nil
 }
 
-// CliTool is one team CLI tool: how to verify and install it on a machine.
+// CliTool is one team CLI tool: how to verify, install, and optionally uninstall it.
 type CliTool struct {
-	Check   string     `yaml:"check"`             // command that verifies presence, e.g. "gh --version"
-	URL     string     `yaml:"url,omitempty"`     // optional download or documentation URL
-	Install CliInstall `yaml:"install,omitempty"` // command string or per-OS map
+	Check     string     `yaml:"check"`               // command that verifies presence, e.g. "gh --version"
+	URL       string     `yaml:"url,omitempty"`       // optional download or documentation URL
+	Install   CliInstall `yaml:"install,omitempty"`   // command string or per-OS map
+	Uninstall CliInstall `yaml:"uninstall,omitempty"` // optional uninstall command string or per-OS map
 }
 
 // ClisFile is the shared CLI registry committed to the hub repo (clis/clis.yaml).

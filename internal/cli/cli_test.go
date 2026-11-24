@@ -34,7 +34,7 @@ func setupIsolatedEnv(t *testing.T) (home, hubDir, projDir string) {
 	os.MkdirAll(filepath.Join(hubDir, "mcp"), 0o755)
 	os.WriteFile(filepath.Join(hubDir, "mcp", "mcp.yaml"), []byte("servers:\n  fs:\n    command: npx\n"), 0o644)
 	os.MkdirAll(filepath.Join(hubDir, "clis"), 0o755)
-	os.WriteFile(filepath.Join(hubDir, "clis", "clis.yaml"), []byte("clis:\n  go:\n    check: go version\n    url: https://go.dev\n    install: winget install GoLang.Go\n  fakecli:\n    check: definitely-missing-cmd-xyz --version\n    url: https://example.test/fakecli\n    install:\n      windows: echo install-win\n      darwin: echo install-mac\n      linux: echo install-linux\n"), 0o644)
+	os.WriteFile(filepath.Join(hubDir, "clis", "clis.yaml"), []byte("clis:\n  go:\n    check: go version\n    url: https://go.dev\n    install: winget install GoLang.Go\n  fakecli:\n    check: definitely-missing-cmd-xyz --version\n    url: https://example.test/fakecli\n    install:\n      windows: echo install-win\n      darwin: echo install-mac\n      linux: echo install-linux\n    uninstall:\n      windows: echo uninstall-win\n      darwin: echo uninstall-mac\n      linux: echo uninstall-linux\n"), 0o644)
 	os.MkdirAll(filepath.Join(hubDir, "docs"), 0o755)
 	os.WriteFile(filepath.Join(hubDir, "docs", "onboarding.md"), []byte("# Welcome\n"), 0o644)
 
@@ -226,11 +226,12 @@ func TestCliInstallInteractivePushAndCliAdd(t *testing.T) {
 		t.Fatalf("expected only alpha selected:\n%s", out)
 	}
 
-	// Register a new CLI via `aiw cli add`
+	// Register a new CLI via `aiw cli add` (with uninstall command)
 	out, _, err = execCLI(t, projDir, "", "cli", "add", "hex",
 		"--check", "hex --version",
 		"--install-windows", "mix local.hex --force",
 		"--install-darwin", "mix local.hex --force",
+		"--uninstall", "mix archive.uninstall hex --force",
 		"--url", "https://hex.pm",
 	)
 	if err != nil {
@@ -238,5 +239,154 @@ func TestCliInstallInteractivePushAndCliAdd(t *testing.T) {
 	}
 	if !strings.Contains(out, "added: cli:hex") || !strings.Contains(out, "pushed branch") {
 		t.Fatalf("unexpected cli add output:\n%s", out)
+	}
+}
+
+func TestSelectiveUninstallAndIgnoreFlow(t *testing.T) {
+	_, hubDir, projDir := setupIsolatedEnv(t)
+
+	if _, _, err := execCLI(t, projDir, "", "init", hubDir, "--tools", "cursor,codex,antigravity"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Uninstall only skill:hello (without --ignore) -> removed from all tools, rule & mcp remain.
+	out, _, err := execCLI(t, projDir, "", "uninstall", "skill:hello")
+	if err != nil {
+		t.Fatalf("selective uninstall skill:hello failed: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(projDir, ".cursor", "skills", "hello")); !os.IsNotExist(err) {
+		t.Fatal("cursor skill hello should be removed")
+	}
+	if _, err := os.Stat(filepath.Join(projDir, ".agents", "skills", "hello")); !os.IsNotExist(err) {
+		t.Fatal("antigravity skill hello should be removed")
+	}
+	if _, err := os.Stat(filepath.Join(projDir, ".cursor", "mcp.json")); err != nil {
+		t.Fatalf("mcp.json should remain intact: %v", err)
+	}
+
+	// 2. Uninstall mcp:fs --ignore -> removes fs and prevents pull from restoring it.
+	out, _, err = execCLI(t, projDir, "", "uninstall", "mcp:fs", "--ignore")
+	if err != nil {
+		t.Fatalf("uninstall mcp:fs --ignore failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "added to ignore: mcp:fs") {
+		t.Fatalf("expected ignore confirmation:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(projDir, ".cursor", "mcp.json")); !os.IsNotExist(err) {
+		t.Fatal("empty cursor mcp.json should be removed")
+	}
+
+	// Pull restores skill:hello (not ignored), but does NOT restore mcp:fs (ignored).
+	if _, _, err := execCLI(t, projDir, "", "pull", "--no-prompt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(projDir, ".cursor", "skills", "hello", "SKILL.md")); err != nil {
+		t.Fatalf("non-ignored skill:hello should be restored by pull: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(projDir, ".cursor", "mcp.json")); !os.IsNotExist(err) {
+		t.Fatal("ignored mcp:fs must not be restored by pull")
+	}
+
+	// 3. `aiw ignore add rule:style` prunes dir rule AND strips block-only AGENTS.md.
+	out, _, err = execCLI(t, projDir, "", "ignore", "add", "rule:style")
+	if err != nil {
+		t.Fatalf("ignore add rule:style failed: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(projDir, ".cursor", "rules", "style.mdc")); !os.IsNotExist(err) {
+		t.Fatal("ignored cursor rule should be pruned immediately")
+	}
+	if _, err := os.Stat(filepath.Join(projDir, "AGENTS.md")); !os.IsNotExist(err) {
+		t.Fatal("block-only AGENTS.md should be stripped when only rule is ignored")
+	}
+
+	// 4. Ignored personal local skill is hidden from status & push.
+	os.MkdirAll(filepath.Join(projDir, ".cursor", "skills", "personal"), 0o755)
+	os.WriteFile(filepath.Join(projDir, ".cursor", "skills", "personal", "SKILL.md"), []byte("private\n"), 0o644)
+	if _, _, err := execCLI(t, projDir, "", "ignore", "add", "skill:personal"); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err = execCLI(t, projDir, "", "status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "to share:  0 added, 0 edited") {
+		t.Fatalf("ignored personal skill should not show in status:\n%s", out)
+	}
+
+	// 5. Uninstall cli:fakecli --yes --ignore runs uninstall command AND makes doctor pass!
+	out, _, err = execCLI(t, projDir, "", "uninstall", "cli:fakecli", "--yes", "--ignore")
+	if err != nil {
+		t.Fatalf("uninstall cli:fakecli failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Uninstalling fakecli:") || !strings.Contains(out, "uninstall-") {
+		t.Fatalf("expected CLI uninstall output:\n%s", out)
+	}
+	out, _, err = execCLI(t, projDir, "", "doctor")
+	if err != nil {
+		t.Fatalf("doctor should pass after ignoring fakecli: err=%v\n%s", err, out)
+	}
+	if !strings.Contains(out, "1 ignored") {
+		t.Fatalf("doctor should mention ignored CLI:\n%s", out)
+	}
+
+	// 6. `aiw ignore list` and `aiw ignore remove`
+	out, _, err = execCLI(t, projDir, "", "ignore", "list")
+	if err != nil || !strings.Contains(out, "mcp:fs") || !strings.Contains(out, "cli:fakecli") {
+		t.Fatalf("ignore list: err=%v out=%s", err, out)
+	}
+	out, _, err = execCLI(t, projDir, "", "ignore", "remove", "mcp:fs")
+	if err != nil || !strings.Contains(out, "un-ignored: mcp:fs") {
+		t.Fatalf("ignore remove: err=%v out=%s", err, out)
+	}
+	if _, _, err := execCLI(t, projDir, "", "pull", "--no-prompt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(projDir, ".cursor", "mcp.json")); err != nil {
+		t.Fatalf("un-ignored mcp:fs should be restored on pull: %v", err)
+	}
+}
+
+func TestPullInteractiveCliPromptChoices(t *testing.T) {
+	_, hubDir, projDir := setupIsolatedEnv(t)
+	if _, _, err := execCLI(t, projDir, "", "init", hubDir, "--tools", "cursor", "--no-prompt"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Choose [s]kip
+	out, _, err := execCLI(t, projDir, "s\n", "pull", "--install-clis")
+	if err != nil {
+		t.Fatalf("pull prompt skip failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Action: [i]nstall, [s]kip, [g] ignore") || !strings.Contains(out, "skipped fakecli") {
+		t.Fatalf("unexpected skip output:\n%s", out)
+	}
+
+	// 2. Choose [i]nstall
+	out, _, err = execCLI(t, projDir, "i\n", "pull", "--install-clis")
+	if err != nil {
+		t.Fatalf("pull prompt install failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Installing fakecli:") || !strings.Contains(out, "install-") {
+		t.Fatalf("unexpected install output:\n%s", out)
+	}
+
+	// 3. Choose [g] ignore -> persisted, so subsequent pull does not prompt and doctor passes
+	out, _, err = execCLI(t, projDir, "g\n", "pull", "--install-clis")
+	if err != nil {
+		t.Fatalf("pull prompt ignore failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "ignored cli:fakecli") {
+		t.Fatalf("unexpected ignore output:\n%s", out)
+	}
+	out, _, err = execCLI(t, projDir, "", "pull", "--install-clis")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "Missing CLI: fakecli") {
+		t.Fatalf("ignored CLI must not prompt again:\n%s", out)
+	}
+	out, _, err = execCLI(t, projDir, "", "cli", "list")
+	if err != nil || !strings.Contains(out, "ignored") {
+		t.Fatalf("cli list should show ignored status:\n%s", out)
 	}
 }

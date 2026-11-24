@@ -164,10 +164,11 @@ func injectHooks(path string, spec HookSpec) ([]config.ManagedEntry, error) {
 		return nil, err
 	}
 	return []config.ManagedEntry{{
-		Path:    path,
-		Kind:    "hook",
-		Key:     spec.Event,
-		Section: hooksKey,
+		Path:     path,
+		Kind:     "hook",
+		Key:      spec.Event,
+		Section:  hooksKey,
+		Resource: "hook:" + spec.Event,
 	}}, nil
 }
 

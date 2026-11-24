@@ -82,3 +82,25 @@ func TestJSONSerializable(t *testing.T) {
 		}
 	}
 }
+
+func TestRunSkipsIgnoredClis(t *testing.T) {
+	isolateHome(t)
+	root := t.TempDir()
+	part := config.PartitionFor(root)
+	os.MkdirAll(filepath.Join(part.Repo, ".git"), 0o755)
+	os.MkdirAll(filepath.Join(part.Repo, "clis"), 0o755)
+	os.WriteFile(filepath.Join(part.Repo, "clis", "clis.yaml"), []byte("clis:\n  nope:\n    check: definitely-missing-cmd-abc --version\n"), 0o644)
+
+	cfg := config.LocalConfig{
+		Repo:        "https://github.com/org/repo",
+		Scope:       "project",
+		ProjectRoot: root,
+		Ignore:      []string{"cli:nope"},
+	}
+	checks := Run(root, cfg, part)
+	for _, c := range checks {
+		if c.Name == "team clis" && !c.OK {
+			t.Fatalf("ignored CLI should not fail doctor: %+v", c)
+		}
+	}
+}

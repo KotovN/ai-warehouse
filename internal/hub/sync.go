@@ -23,6 +23,7 @@ type Syncer struct {
 	RepoPath  string           // hub clone path
 	Partition config.Partition // machine-data partition holding state.json
 	Tools     []string
+	Ignore    []string // canonical selectors to exclude: skill:<n>, rule:<n>, mcp:<n>, cli:<n>
 }
 
 // Report summarizes one pull.
@@ -35,8 +36,8 @@ type Report struct {
 	Warnings    []string
 }
 
-// Pull installs resources into every detected (or explicitly requested) tool
-// and prunes previously managed entries that were deleted from the hub.
+// Pull installs non-ignored resources into every detected (or explicitly requested)
+// tool and prunes previously managed entries that were deleted from the hub or ignored.
 func (s Syncer) Pull(dryRun bool) (Report, error) {
 	report := Report{}
 	// Best-effort refresh of the hub clone: an offline machine still pulls
@@ -48,10 +49,12 @@ func (s Syncer) Pull(dryRun bool) (Report, error) {
 			}
 		}
 	}
-	res, err := BuildResources(s.RepoPath)
+	rawRes, err := BuildResources(s.RepoPath)
 	if err != nil {
 		return report, err
 	}
+	res := FilterResources(rawRes, s.Ignore)
+
 	scope := s.Scope
 	if scope == "" {
 		scope = "project"
@@ -60,9 +63,9 @@ func (s Syncer) Pull(dryRun bool) (Report, error) {
 	if err != nil {
 		return report, err
 	}
-	report.CliDetails = InspectClis(res.Clis, runtime.GOOS)
+	report.CliDetails = InspectClisWithIgnore(rawRes.Clis, runtime.GOOS, s.Ignore)
 	for _, c := range report.CliDetails {
-		if !c.Installed {
+		if !c.Installed && !c.Ignored {
 			report.MissingClis = append(report.MissingClis, c.Name)
 		}
 	}
@@ -108,7 +111,7 @@ func (s Syncer) Pull(dryRun bool) (Report, error) {
 		}
 
 		// Prune any previously managed entries for this adapter that are no
-		// longer part of the hub's desired state.
+		// longer part of the hub's desired (non-ignored) state.
 		pruned, pruneWarns := pruneStale(st.Managed[a.ID()], managed)
 		report.Pruned += pruned
 		report.Warnings = append(report.Warnings, pruneWarns...)
@@ -127,15 +130,99 @@ func (s Syncer) Pull(dryRun bool) (Report, error) {
 	return report, nil
 }
 
+// FilterResources returns a copy of res with any ignored skills, rules, and
+// MCP servers excluded.
+func FilterResources(res tool.Resources, ignore []string) tool.Resources {
+	if len(ignore) == 0 {
+		return res
+	}
+	out := res
+	out.Skills = nil
+	for _, sk := range res.Skills {
+		if !config.IsIgnored(ignore, "skill", sk.Name) {
+			out.Skills = append(out.Skills, sk)
+		}
+	}
+	out.Rules = nil
+	for _, r := range res.Rules {
+		if !config.IsIgnored(ignore, "rule", r.Name) {
+			out.Rules = append(out.Rules, r)
+		}
+	}
+	if len(res.MCP.Servers) > 0 {
+		servers := make(map[string]config.MCPServer, len(res.MCP.Servers))
+		for name, s := range res.MCP.Servers {
+			if !config.IsIgnored(ignore, "mcp", name) {
+				servers[name] = s
+			}
+		}
+		out.MCP = config.MCPFile{Servers: servers}
+	}
+	return out
+}
+
+// ReapplyRuleBlocks updates or strips any managed markdown rule blocks recorded
+// in st using the cached hub repo's rules after excluding excludeRules.
+func ReapplyRuleBlocks(repoPath string, excludeRules []string, st *config.State, dryRun bool) (int, error) {
+	rawRes, err := BuildResources(repoPath)
+	if err != nil {
+		return 0, err
+	}
+	filtered := FilterResources(rawRes, excludeRules)
+	updated := 0
+	seenPaths := map[string]bool{}
+	for id, entries := range st.Managed {
+		var kept []config.ManagedEntry
+		for _, e := range entries {
+			if e.Kind != "block" {
+				kept = append(kept, e)
+				continue
+			}
+			if _, statErr := os.Stat(e.Path); os.IsNotExist(statErr) {
+				continue
+			}
+			updated++
+			if !dryRun && !seenPaths[e.Path] {
+				seenPaths[e.Path] = true
+				if err := tool.ReplaceRulesBlock(e.Path, filtered); err != nil {
+					return updated, err
+				}
+			}
+			if len(filtered.Rules) > 0 {
+				kept = append(kept, e)
+			}
+		}
+		if !dryRun {
+			if len(kept) == 0 {
+				delete(st.Managed, id)
+			} else {
+				st.Managed[id] = kept
+			}
+		}
+	}
+	return updated, nil
+}
+
+type managedKey struct {
+	Path    string
+	Kind    string
+	Key     string
+	Section string
+}
+
+func keyForManaged(e config.ManagedEntry) managedKey {
+	return managedKey{Path: e.Path, Kind: e.Kind, Key: e.Key, Section: e.Section}
+}
+
 func pruneStale(prev, current []config.ManagedEntry) (int, []string) {
-	keep := make(map[config.ManagedEntry]bool, len(current))
+	keep := make(map[managedKey]bool, len(current))
 	for _, e := range current {
-		keep[e] = true
+		keep[keyForManaged(e)] = true
 	}
 	pruned := 0
 	var warnings []string
 	for _, old := range prev {
-		if keep[old] {
+		if keep[keyForManaged(old)] {
 			continue
 		}
 		acted, err := tool.UndoManaged(old, false)
@@ -151,17 +238,19 @@ func pruneStale(prev, current []config.ManagedEntry) (int, []string) {
 }
 
 func mergeManaged(existing, added []config.ManagedEntry) []config.ManagedEntry {
-	seen := make(map[config.ManagedEntry]bool, len(existing)+len(added))
+	seen := make(map[managedKey]bool, len(existing)+len(added))
 	out := make([]config.ManagedEntry, 0, len(existing)+len(added))
-	for _, e := range existing {
-		if !seen[e] {
-			seen[e] = true
+	for _, e := range added {
+		k := keyForManaged(e)
+		if !seen[k] {
+			seen[k] = true
 			out = append(out, e)
 		}
 	}
-	for _, e := range added {
-		if !seen[e] {
-			seen[e] = true
+	for _, e := range existing {
+		k := keyForManaged(e)
+		if !seen[k] {
+			seen[k] = true
 			out = append(out, e)
 		}
 	}

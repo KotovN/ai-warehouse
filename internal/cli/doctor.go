@@ -56,6 +56,9 @@ func runStatus(cmd *cobra.Command) error {
 	fmt.Fprintf(out, "hub:       %s\n", cfg.Repo)
 	fmt.Fprintf(out, "scope:     %s (%s)\n", or(cfg.Scope, "project"), root)
 	fmt.Fprintf(out, "tools:     %v\n", orAuto(cfg.Tools))
+	if len(cfg.Ignore) > 0 {
+		fmt.Fprintf(out, "ignored:   %v\n", cfg.Ignore)
+	}
 	if st, err := config.LoadState(part.State); err == nil {
 		rev := or(st.Revision, "none")
 		if len(rev) > 8 {
@@ -67,11 +70,25 @@ func runStatus(cmd *cobra.Command) error {
 	}
 	checks := doctor.Run(root, cfg, part)
 	fmt.Fprintf(out, "doctor:    %d/%d checks ok\n", len(checks)-countFailed(checks), len(checks))
-	added, edited, err := hub.DiffLocalScope(root, cfg.Scope, part.Repo)
+	items, err := hub.DiffLocalWithIgnore(root, cfg.Scope, part.Repo, "", cfg.Ignore)
 	if err != nil {
 		return err
 	}
+	var added, edited []string
+	for _, it := range items {
+		if it.Status == "added" {
+			added = append(added, it.ID())
+		} else {
+			edited = append(edited, it.ID())
+		}
+	}
 	fmt.Fprintf(out, "to share:  %d added, %d edited (aiw push --dry-run for details)\n", len(added), len(edited))
+	if len(added) > 0 {
+		fmt.Fprintf(out, "  added:   %v\n", added)
+	}
+	if len(edited) > 0 {
+		fmt.Fprintf(out, "  edited:  %v\n", edited)
+	}
 	return nil
 }
 

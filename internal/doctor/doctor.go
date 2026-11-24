@@ -117,7 +117,12 @@ func Run(root string, cfg config.LocalConfig, part config.Partition) []Check {
 
 	// Team CLI tools (uses the zero-value res when the clone is unreadable).
 	var missingDetails []string
-	for _, st := range hub.InspectClis(res.Clis, runtime.GOOS) {
+	ignoredClis := 0
+	for _, st := range hub.InspectClisWithIgnore(res.Clis, runtime.GOOS, cfg.Ignore) {
+		if st.Ignored {
+			ignoredClis++
+			continue
+		}
 		if !st.Installed {
 			hint := st.Name
 			if st.InstallCmd != "" {
@@ -130,6 +135,8 @@ func Run(root string, cfg config.LocalConfig, part config.Partition) []Check {
 	}
 	if len(missingDetails) > 0 {
 		add("team clis", false, "missing: %s — run aiw cli install", strings.Join(missingDetails, "; "))
+	} else if ignoredClis > 0 {
+		add("team clis", true, "all required clis present (%d ignored)", ignoredClis)
 	} else {
 		add("team clis", true, "all registered clis present")
 	}

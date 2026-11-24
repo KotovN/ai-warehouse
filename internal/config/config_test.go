@@ -195,6 +195,66 @@ func TestLoadClisStringAndPerOS(t *testing.T) {
 	}
 }
 
+func TestIgnoreHelpersAndCanonicalResource(t *testing.T) {
+	updated, added, err := AddIgnore(nil, "skills:hello", "cli:hex", "skill:hello", "mcp:fs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"cli:hex", "mcp:fs", "skill:hello"}
+	if !reflect.DeepEqual(updated, want) || !reflect.DeepEqual(added, want) {
+		t.Fatalf("AddIgnore got updated=%v added=%v", updated, added)
+	}
+	if !IsIgnored(updated, "skill", "hello") || !IsIgnored(updated, "cli", "hex") || IsIgnored(updated, "skill", "other") {
+		t.Fatalf("IsIgnored mismatch for %v", updated)
+	}
+	rem, removed, err := RemoveIgnore(updated, "cli:hex", "mcp:none")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(removed, []string{"cli:hex"}) || !reflect.DeepEqual(rem, []string{"mcp:fs", "skill:hello"}) {
+		t.Fatalf("RemoveIgnore got rem=%v removed=%v", rem, removed)
+	}
+	if _, err := NormalizeSelector("badselector"); err == nil {
+		t.Fatal("expected error for missing colon")
+	}
+	if _, err := NormalizeSelector("bogus:x"); err == nil {
+		t.Fatal("expected error for unknown kind")
+	}
+
+	// Legacy v1.0/v1.1 entries without Resource infer canonical selector.
+	if got := (ManagedEntry{Path: filepath.Join("a", ".cursor", "skills", "eli5"), Kind: "file"}).CanonicalResource(); got != "skill:eli5" {
+		t.Fatalf("legacy skill resource: %q", got)
+	}
+	if got := (ManagedEntry{Path: filepath.Join("a", ".cursor", "rules", "style.mdc"), Kind: "file"}).CanonicalResource(); got != "rule:style" {
+		t.Fatalf("legacy rule resource: %q", got)
+	}
+	if got := (ManagedEntry{Path: "mcp.json", Kind: "mcp", Key: "fs"}).CanonicalResource(); got != "mcp:fs" {
+		t.Fatalf("legacy mcp resource: %q", got)
+	}
+}
+
+func TestCliToolUninstallRoundtrip(t *testing.T) {
+	root := t.TempDir()
+	in := ClisFile{Clis: map[string]CliTool{
+		"hex": {
+			Check:     "hex --version",
+			URL:       "https://hex.pm",
+			Install:   CliInstall{ByOS: map[string]string{"windows": "mix local.hex --force"}},
+			Uninstall: CliInstall{Default: "mix archive.uninstall hex --force"},
+		},
+	}}
+	if err := SaveClis(root, in); err != nil {
+		t.Fatal(err)
+	}
+	out, err := LoadClis(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Clis["hex"].Uninstall.ForOS("windows") != "mix archive.uninstall hex --force" {
+		t.Fatalf("uninstall roundtrip: %+v", out.Clis["hex"])
+	}
+}
+
 func TestSkillDirs(t *testing.T) {
 	root := t.TempDir()
 	os.MkdirAll(filepath.Join(root, "skills", "go-tips"), 0o755)

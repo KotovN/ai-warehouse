@@ -23,6 +23,7 @@ type Pusher struct {
 	Repo      provider.Repo
 	Username  string
 	Reviewers []string
+	Ignore    []string // canonical selectors excluded from local diff/push
 }
 
 // PushOptions controls what PushWithOptions selects and shares.
@@ -31,6 +32,7 @@ type PushOptions struct {
 	Select   []string // selectors: "skill:name", "rule:name", "mcp:name", or bare "name"
 	Types    []string // category filter: "skills", "rules", "mcp"
 	FromTool string   // optional single tool ID to scan from
+	Ignore   []string // additional selectors to exclude
 }
 
 // DiffItem describes one shareable local addition or modification.
@@ -76,7 +78,9 @@ func (p Pusher) PushWithOptions(opts PushOptions) (PushReport, error) {
 	if err := p.Repo.CloneFull(p.Partition.Worktree); err != nil {
 		return report, fmt.Errorf("clone for push: %w", err)
 	}
-	allItems, err := DiffLocalItems(p.Root, p.scope(), p.Partition.Worktree, opts.FromTool)
+	ignore := append([]string(nil), p.Ignore...)
+	ignore = append(ignore, opts.Ignore...)
+	allItems, err := DiffLocalWithIgnore(p.Root, p.scope(), p.Partition.Worktree, opts.FromTool, ignore)
 	if err != nil {
 		return report, err
 	}
@@ -218,9 +222,14 @@ func DiffLocalScope(root, scope, clonePath string) (added, edited []string, err 
 
 // DiffLocalItems inspects every configured tool adapter (or only fromTool if set)
 // and returns all added or edited skills, rules, and secret-stripped MCP servers.
+func DiffLocalItems(root, scope, clonePath, fromTool string) ([]DiffItem, error) {
+	return DiffLocalWithIgnore(root, scope, clonePath, fromTool, nil)
+}
+
+// DiffLocalWithIgnore is DiffLocalItems with ignored selectors excluded.
 // When multiple tools contain the same asset, any edited copy wins over an
 // unchanged hub copy so edits made in secondary tools are never shadowed.
-func DiffLocalItems(root, scope, clonePath, fromTool string) ([]DiffItem, error) {
+func DiffLocalWithIgnore(root, scope, clonePath, fromTool string, ignore []string) ([]DiffItem, error) {
 	if scope == "" {
 		scope = "project"
 	}
@@ -319,6 +328,9 @@ func DiffLocalItems(root, scope, clonePath, fromTool string) ([]DiffItem, error)
 
 	items := make([]DiffItem, 0, len(found))
 	for _, it := range found {
+		if config.IsIgnored(ignore, it.Kind, it.Name) {
+			continue
+		}
 		items = append(items, it)
 	}
 	sort.Slice(items, func(i, j int) bool {

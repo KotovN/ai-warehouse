@@ -60,7 +60,11 @@ func (a *SpecAdapter) Install(res Resources) ([]config.ManagedEntry, error) {
 			if err := CopyDir(sk.Dir, dst); err != nil {
 				return managed, err
 			}
-			managed = append(managed, config.ManagedEntry{Path: dst, Kind: "file"})
+			managed = append(managed, config.ManagedEntry{
+				Path:     dst,
+				Kind:     "file",
+				Resource: "skill:" + sk.Name,
+			})
 		}
 	}
 
@@ -77,14 +81,22 @@ func (a *SpecAdapter) Install(res Resources) ([]config.ManagedEntry, error) {
 				if err := writeFile(dst, []byte(r.Content)); err != nil {
 					return managed, err
 				}
-				managed = append(managed, config.ManagedEntry{Path: dst, Kind: "file"})
+				managed = append(managed, config.ManagedEntry{
+					Path:     dst,
+					Kind:     "file",
+					Resource: "rule:" + r.Name,
+				})
 			}
 		case "block":
 			if blk := rulesBlock(res); blk != "" {
 				if err := replaceBlock(target, blk); err != nil {
 					return managed, err
 				}
-				managed = append(managed, config.ManagedEntry{Path: target, Kind: "block"})
+				managed = append(managed, config.ManagedEntry{
+					Path:     target,
+					Kind:     "block",
+					Resource: "rules",
+				})
 			}
 		}
 	}
@@ -101,10 +113,11 @@ func (a *SpecAdapter) Install(res Resources) ([]config.ManagedEntry, error) {
 		sort.Strings(names)
 		for _, name := range names {
 			managed = append(managed, config.ManagedEntry{
-				Path:    target,
-				Kind:    "mcp",
-				Key:     name,
-				Section: p.MCP.Key,
+				Path:     target,
+				Kind:     "mcp",
+				Key:      name,
+				Section:  p.MCP.Key,
+				Resource: "mcp:" + name,
 			})
 		}
 	}

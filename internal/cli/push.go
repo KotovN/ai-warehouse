@@ -59,7 +59,7 @@ func runPush(cmd *cobra.Command, args []string, flags pushFlags) error {
 	typeList := splitCSV(flags.types)
 
 	if flags.interactive && len(selected) == 0 {
-		picked, cancelled, err := promptSelectItems(cmd, root, cfg.Scope, part.Repo, flags.fromTool, typeList)
+		picked, cancelled, err := promptSelectItems(cmd, root, cfg.Scope, part.Repo, flags.fromTool, typeList, cfg.Ignore)
 		if err != nil {
 			return err
 		}
@@ -77,6 +77,7 @@ func runPush(cmd *cobra.Command, args []string, flags pushFlags) error {
 		Repo:      repo,
 		Username:  username(cfg),
 		Reviewers: reviewers,
+		Ignore:    cfg.Ignore,
 	}
 	report, err := pusher.PushWithOptions(hub.PushOptions{
 		DryRun:   flags.dryRun,
@@ -87,8 +88,8 @@ func runPush(cmd *cobra.Command, args []string, flags pushFlags) error {
 	return handlePushResult(cmd, report, err, flags.dryRun)
 }
 
-func promptSelectItems(cmd *cobra.Command, root, scope, clonePath, fromTool string, types []string) ([]string, bool, error) {
-	items, err := hub.DiffLocalItems(root, scope, clonePath, fromTool)
+func promptSelectItems(cmd *cobra.Command, root, scope, clonePath, fromTool string, types, ignore []string) ([]string, bool, error) {
+	items, err := hub.DiffLocalWithIgnore(root, scope, clonePath, fromTool, ignore)
 	if err != nil {
 		return nil, false, err
 	}

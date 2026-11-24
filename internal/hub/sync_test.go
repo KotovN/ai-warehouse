@@ -143,3 +143,44 @@ func TestCheckClisMissingPresentAndWhitespace(t *testing.T) {
 		t.Fatalf("missing: %v", missing)
 	}
 }
+
+func TestSyncerPullRespectsIgnoreAndPrunes(t *testing.T) {
+	isolateHome(t)
+	projRoot := t.TempDir()
+	part := config.PartitionFor(projRoot)
+	if err := part.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	repo := fixtureRepo(t)
+
+	// First pull installs everything into cursor + codex.
+	s := Syncer{Root: projRoot, RepoPath: repo, Partition: part, Tools: []string{"cursor", "codex"}}
+	if _, err := s.Pull(false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(projRoot, ".cursor", "skills", "go-tips", "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(projRoot, "AGENTS.md")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Second pull ignores skill:go-tips, rule:code-review, mcp:fs, cli:nope-tool.
+	s.Ignore = []string{"skill:go-tips", "rule:code-review", "mcp:fs", "cli:nope-tool"}
+	report, err := s.Pull(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.MissingClis) != 0 {
+		t.Fatalf("ignored CLI should not be reported missing: %v", report.MissingClis)
+	}
+	if _, err := os.Stat(filepath.Join(projRoot, ".cursor", "skills", "go-tips")); !os.IsNotExist(err) {
+		t.Fatal("ignored skill should be pruned")
+	}
+	if _, err := os.Stat(filepath.Join(projRoot, ".cursor", "rules", "code-review.mdc")); !os.IsNotExist(err) {
+		t.Fatal("ignored dir rule should be pruned")
+	}
+	if _, err := os.Stat(filepath.Join(projRoot, "AGENTS.md")); !os.IsNotExist(err) {
+		t.Fatal("block-only AGENTS.md should be stripped when all rules ignored")
+	}
+}

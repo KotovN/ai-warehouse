@@ -15,6 +15,7 @@ func New() *cobra.Command {
 		newPull(),
 		newPush(),
 		newCli(),
+		newIgnore(),
 		newList(),
 		newStatus(),
 		newDoctor(),
@@ -25,23 +26,30 @@ func New() *cobra.Command {
 
 func newInit() *cobra.Command {
 	var scope, tools string
-	var force bool
+	var force, noPrompt, autoYes bool
 	cmd := &cobra.Command{Use: "init [repo-url]", Short: "Attach a hub repo and set up local tools"}
 	cmd.Flags().StringVar(&scope, "scope", "project", "install scope: project|user")
 	cmd.Flags().StringVar(&tools, "tools", "", "comma-separated AI tools (e.g. cursor,codex,vscode,opencode,claude,antigravity)")
 	cmd.Flags().BoolVar(&force, "force", false, "re-clone the hub repo even if already cloned")
-	cmd.RunE = func(cmd *cobra.Command, args []string) error { return runInit(cmd, args, scope, tools, force) }
+	cmd.Flags().BoolVar(&noPrompt, "no-prompt", false, "do not prompt to install missing CLIs")
+	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "automatically install missing CLIs without prompting")
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		return runInit(cmd, args, scope, tools, force, noPrompt, autoYes)
+	}
 	return cmd
 }
 
 func newPull() *cobra.Command {
-	var dryRun, quiet, installClis, autoYes bool
+	var dryRun, quiet, installClis, noPrompt, autoYes bool
 	cmd := &cobra.Command{Use: "pull", Short: "Sync hub resources into local AI tools"}
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "show what would change without writing")
-	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "suppress output on success (used by session-start hooks)")
+	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "suppress output and prompts (used by session-start hooks)")
 	cmd.Flags().BoolVar(&installClis, "install-clis", false, "prompt to install missing team CLIs after pulling")
-	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "skip confirmation prompts when installing CLIs")
-	cmd.RunE = func(cmd *cobra.Command, _ []string) error { return runPull(cmd, dryRun, quiet, installClis, autoYes) }
+	cmd.Flags().BoolVar(&noPrompt, "no-prompt", false, "do not interactively prompt for missing CLIs")
+	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "automatically install missing CLIs without prompting")
+	cmd.RunE = func(cmd *cobra.Command, _ []string) error {
+		return runPull(cmd, dryRun, quiet, installClis, noPrompt, autoYes)
+	}
 	return cmd
 }
 
@@ -91,8 +99,36 @@ func newCliAdd() *cobra.Command {
 	cmd.Flags().StringVar(&opts.installWindows, "install-windows", "", "Windows install command")
 	cmd.Flags().StringVar(&opts.installDarwin, "install-darwin", "", "macOS install command")
 	cmd.Flags().StringVar(&opts.installLinux, "install-linux", "", "Linux install command")
+	cmd.Flags().StringVar(&opts.uninstallDefault, "uninstall", "", "optional cross-platform uninstall command")
+	cmd.Flags().StringVar(&opts.uninstallWindows, "uninstall-windows", "", "optional Windows uninstall command")
+	cmd.Flags().StringVar(&opts.uninstallDarwin, "uninstall-darwin", "", "optional macOS uninstall command")
+	cmd.Flags().StringVar(&opts.uninstallLinux, "uninstall-linux", "", "optional Linux uninstall command")
 	cmd.Flags().BoolVar(&opts.dryRun, "dry-run", false, "preview without pushing")
 	cmd.RunE = func(c *cobra.Command, args []string) error { return runCliAdd(c, args[0], opts) }
+	return cmd
+}
+
+func newIgnore() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "ignore",
+		Short: "Ignore specific skills, rules, MCP servers, or CLIs on this machine",
+	}
+	cmd.AddCommand(
+		&cobra.Command{Use: "list", Short: "List currently ignored resources", RunE: runIgnoreList},
+		&cobra.Command{
+			Use:   "add <item...>",
+			Short: "Ignore resource(s) (skill:<n>, rule:<n>, mcp:<n>, cli:<n>) and prune locally",
+			Args:  cobra.MinimumNArgs(1),
+			RunE:  runIgnoreAdd,
+		},
+		&cobra.Command{
+			Use:     "remove <item...>",
+			Aliases: []string{"rm"},
+			Short:   "Stop ignoring resource(s) so the next pull syncs them again",
+			Args:    cobra.MinimumNArgs(1),
+			RunE:    runIgnoreRemove,
+		},
+	)
 	return cmd
 }
 
@@ -113,9 +149,16 @@ func newDoctor() *cobra.Command {
 }
 
 func newUninstall() *cobra.Command {
-	var dryRun bool
-	cmd := &cobra.Command{Use: "uninstall", Short: "Remove aiw-managed resources"}
+	var dryRun, addIgnore, autoYes bool
+	cmd := &cobra.Command{
+		Use:   "uninstall [items...]",
+		Short: "Remove all or specific aiw-managed resources (skill:<n>, rule:<n>, mcp:<n>, cli:<n>)",
+	}
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "show what would be removed without writing")
-	cmd.RunE = func(c *cobra.Command, _ []string) error { return runUninstall(c, dryRun) }
+	cmd.Flags().BoolVar(&addIgnore, "ignore", false, "also add uninstalled item(s) to the ignore list so pull won't restore them")
+	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "skip confirmation prompts when running CLI uninstall commands")
+	cmd.RunE = func(c *cobra.Command, args []string) error {
+		return runUninstall(c, args, uninstallFlags{dryRun: dryRun, addIgnore: addIgnore, autoYes: autoYes})
+	}
 	return cmd
 }

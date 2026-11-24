@@ -14,7 +14,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func runInit(cmd *cobra.Command, args []string, scope, tools string, force bool) error {
+func runInit(cmd *cobra.Command, args []string, scope, tools string, force, noPrompt, autoYes bool) error {
 	if len(args) == 0 {
 		return errors.New("usage: aiw init <repo-url>")
 	}
@@ -29,6 +29,9 @@ func runInit(cmd *cobra.Command, args []string, scope, tools string, force bool)
 	if err := part.Ensure(); err != nil {
 		return err
 	}
+
+	// Preserve existing machine-local settings (like Ignore/Username) when re-initializing.
+	prevCfg, _ := config.Load(part.Config)
 
 	repoURL := strings.TrimSpace(args[0])
 	needClone := false
@@ -60,7 +63,13 @@ func runInit(cmd *cobra.Command, args []string, scope, tools string, force bool)
 		}
 	}
 
-	cfg := config.LocalConfig{Repo: repoURL, Scope: scope, Tools: selectedTools}
+	cfg := config.LocalConfig{
+		Repo:     repoURL,
+		Username: prevCfg.Username,
+		Scope:    scope,
+		Tools:    selectedTools,
+		Ignore:   prevCfg.Ignore,
+	}
 	if scope == "project" {
 		cfg.ProjectRoot = root
 	}
@@ -73,11 +82,19 @@ func runInit(cmd *cobra.Command, args []string, scope, tools string, force bool)
 		RepoPath:  part.Repo,
 		Partition: part,
 		Tools:     cfg.Tools,
+		Ignore:    cfg.Ignore,
 	}.Pull(false)
 	if err != nil {
 		return err
 	}
-	printReport(cmd.OutOrStdout(), cmd.ErrOrStderr(), report)
+	missing := missingNonIgnoredClis(report.CliDetails)
+	shouldPrompt := !noPrompt && len(missing) > 0 && (autoYes || isInteractiveStdin(cmd))
+	printReport(cmd.OutOrStdout(), cmd.ErrOrStderr(), report, !shouldPrompt)
+	if shouldPrompt {
+		if err := promptAndInstallClis(cmd, part, &cfg, missing, false, autoYes); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -102,7 +119,7 @@ func validateTools(root, scope, repoPath string, requested []string) error {
 	return nil
 }
 
-func runPull(cmd *cobra.Command, dryRun, quiet, installClis, autoYes bool) error {
+func runPull(cmd *cobra.Command, dryRun, quiet, installClis, noPrompt, autoYes bool) error {
 	part, root, cfg, err := activeInstall()
 	if err != nil {
 		return err
@@ -113,31 +130,38 @@ func runPull(cmd *cobra.Command, dryRun, quiet, installClis, autoYes bool) error
 		RepoPath:  part.Repo,
 		Partition: part,
 		Tools:     cfg.Tools,
+		Ignore:    cfg.Ignore,
 	}.Pull(dryRun)
 	if err != nil {
 		return err
 	}
+	missing := missingNonIgnoredClis(report.CliDetails)
+	shouldPrompt := !dryRun && !quiet && !noPrompt && len(missing) > 0 && (installClis || autoYes || isInteractiveStdin(cmd))
 	if !quiet {
 		if dryRun {
 			fmt.Fprintln(cmd.OutOrStdout(), "dry run — no changes written")
 		}
-		printReport(cmd.OutOrStdout(), cmd.ErrOrStderr(), report)
+		printReport(cmd.OutOrStdout(), cmd.ErrOrStderr(), report, !shouldPrompt)
 	}
-	if installClis && !dryRun && len(report.MissingClis) > 0 {
-		var missing []hub.CliStatus
-		for _, c := range report.CliDetails {
-			if !c.Installed {
-				missing = append(missing, c)
-			}
-		}
-		if err := installCliList(cmd, missing, false, autoYes); err != nil {
+	if shouldPrompt {
+		if err := promptAndInstallClis(cmd, part, &cfg, missing, false, autoYes); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func printReport(out, errOut io.Writer, r hub.Report) {
+func missingNonIgnoredClis(details []hub.CliStatus) []hub.CliStatus {
+	var missing []hub.CliStatus
+	for _, c := range details {
+		if !c.Installed && !c.Ignored {
+			missing = append(missing, c)
+		}
+	}
+	return missing
+}
+
+func printReport(out, errOut io.Writer, r hub.Report, showMissingClis bool) {
 	for _, w := range r.Warnings {
 		fmt.Fprintln(errOut, "warning:", w)
 	}
@@ -148,10 +172,10 @@ func printReport(out, errOut io.Writer, r hub.Report) {
 	if len(r.Skipped) > 0 {
 		fmt.Fprintln(out, "skipped (tool not detected):", strings.Join(r.Skipped, ", "))
 	}
-	if len(r.MissingClis) > 0 {
+	if showMissingClis && len(r.MissingClis) > 0 {
 		fmt.Fprintln(out, "missing CLIs:")
 		for _, c := range r.CliDetails {
-			if c.Installed {
+			if c.Installed || c.Ignored {
 				continue
 			}
 			line := "  - " + c.Name
@@ -163,6 +187,6 @@ func printReport(out, errOut io.Writer, r hub.Report) {
 			}
 			fmt.Fprintln(out, line)
 		}
-		fmt.Fprintln(out, "  run 'aiw cli install' to install missing CLIs")
+		fmt.Fprintln(out, "  run 'aiw cli install' to install missing CLIs (or 'aiw ignore add cli:<name>')")
 	}
 }

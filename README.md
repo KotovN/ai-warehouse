@@ -34,7 +34,7 @@ servers:
     url: https://mcp.example.com/sse
 ```
 
-Example `clis/clis.yaml` (supports a single string or per-OS `windows`/`darwin`/`linux` map plus optional `url`):
+Example `clis/clis.yaml` (supports a single string or per-OS `windows`/`darwin`/`linux` map for both `install` and optional `uninstall`, plus `url`):
 
 ```yaml
 clis:
@@ -45,10 +45,14 @@ clis:
       windows: winget install --id GitHub.cli -e
       darwin: brew install gh
       linux: sudo apt install gh
+    uninstall:
+      windows: winget uninstall --id GitHub.cli
+      darwin: brew uninstall gh
   hex:
     check: hex --version
     url: https://hex.pm/docs/usage
     install: mix local.hex --force
+    uninstall: mix archive.uninstall hex --force
 ```
 
 **Members:** in any project directory:
@@ -98,16 +102,17 @@ project:
 
 | Command | What it does |
 |---|---|
-| `aiw init <repo-url>` | Attach a hub repo, clone, install, inject hooks. `--scope project\|user`, `--tools <ids>`, `--force` |
-| `aiw pull` | Hub → local tools (and prunes deleted hub assets). `--dry-run`, `--quiet`/`-q`, `--install-clis`, `--yes`/`-y` |
+| `aiw init <repo-url>` | Attach a hub repo, clone, install, inject hooks. `--scope project\|user`, `--tools <ids>`, `--force`, `--no-prompt`, `--yes` |
+| `aiw pull` | Hub → local tools (prunes deleted/ignored assets; interactively prompts `[i]nstall / [s]kip / [g] ignore` for missing CLIs in a TTY). `--dry-run`, `--quiet`/`-q`, `--no-prompt`, `--install-clis`, `--yes`/`-y` |
 | `aiw push [items...]` | Share local skills, rules, or MCP servers → branch `aiw/<user>` → PR. Supports `skill:<name>`, `rule:<name>`, `mcp:<name>`, `--type`, `--from`, `-i`/`--interactive`, `--dry-run` |
-| `aiw cli list` | Show registered team CLIs, presence status, OS install command, and URL |
-| `aiw cli install [name...]` | Install missing (or specific) CLIs with confirmation (`--yes`, `--dry-run`) |
-| `aiw cli add <name>` | Register a CLI (`--check`, `--install`, `--install-windows/--darwin/--linux`, `--url`) and share via PR |
+| `aiw cli list` | Show registered team CLIs, presence/ignored status, OS install command, and URL |
+| `aiw cli install [name...]` | Install missing (or specific) CLIs (`[i]nstall / [s]kip / [g] ignore`, `--yes`, `--dry-run`) |
+| `aiw cli add <name>` | Register a CLI (`--check`, `--install*`, `--uninstall*`, `--url`) and share via PR |
+| `aiw ignore add\|remove\|list` | Ignore specific `skill:<n>`, `rule:<n>`, `mcp:<n>`, or `cli:<n>` on this machine (immediately prunes ignored local managed entries) |
 | `aiw list [type]` | Inventory across active tools; `type` = `skills`, `rules`, `mcp`, `hooks`, `clis`, `docs` |
-| `aiw status` | Hub, scope, last pull, doctor summary, to-share counts |
-| `aiw doctor` | Diagnostics with fix hints; `--json` for CI; exit 1 on failure |
-| `aiw uninstall` | Remove managed resources only; `--dry-run` |
+| `aiw status` | Hub, scope, ignored list, last pull, doctor summary, and concrete to-share items |
+| `aiw doctor` | Diagnostics with fix hints (skips ignored CLIs); `--json` for CI; exit 1 on failure |
+| `aiw uninstall [items...]` | Remove all managed resources, or concrete `skill:<n>`, `rule:<n>`, `mcp:<n>`, `cli:<n>` items (`--ignore`, `--yes`, `--dry-run`) |
 
 Push flow: selected changes are committed to `aiw/<username>` and force-pushed, updating your open PR instead of opening duplicates. On non-API hosts (GitLab, etc.) the branch is pushed cleanly and you open the PR by hand. **Secrets never go into the hub** — `env` and `headers` are automatically stripped when sharing local MCP servers.
 

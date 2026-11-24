@@ -61,14 +61,23 @@ func runList(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if filter == "" || filter == "clis" {
-		statuses := hub.InspectClis(res.Clis, runtime.GOOS)
+		statuses := hub.InspectClisWithIgnore(res.Clis, runtime.GOOS, cfg.Ignore)
 		var missing []string
+		ignoredCount := 0
 		for _, s := range statuses {
+			if s.Ignored {
+				ignoredCount++
+				continue
+			}
 			if !s.Installed {
 				missing = append(missing, s.Name)
 			}
 		}
-		fmt.Fprintf(out, "%-12s missing clis: %v (%d total)\n", "cli", missing, len(statuses))
+		if ignoredCount > 0 {
+			fmt.Fprintf(out, "%-12s missing clis: %v (%d total, %d ignored)\n", "cli", missing, len(statuses), ignoredCount)
+		} else {
+			fmt.Fprintf(out, "%-12s missing clis: %v (%d total)\n", "cli", missing, len(statuses))
+		}
 	}
 	if filter == "" || filter == "docs" {
 		fmt.Fprintf(out, "%-12s hub docs: %v\n", "docs", listDocs(part.Repo))

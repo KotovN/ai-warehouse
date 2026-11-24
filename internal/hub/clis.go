@@ -11,32 +11,42 @@ import (
 	"github.com/KotovN/ai-warehouse/internal/config"
 )
 
-// CliStatus reports the presence and OS-specific install metadata of a team CLI.
+// CliStatus reports the presence and OS-specific install/uninstall metadata of a team CLI.
 type CliStatus struct {
-	Name       string
-	Installed  bool
-	Check      string
-	InstallCmd string
-	URL        string
+	Name         string
+	Installed    bool
+	Ignored      bool
+	Check        string
+	InstallCmd   string
+	UninstallCmd string
+	URL          string
 }
 
 // InspectClis checks every registered CLI in sorted order and resolves the
-// install command for goos (e.g. runtime.GOOS).
+// install/uninstall commands for goos (e.g. runtime.GOOS).
 func InspectClis(clis config.ClisFile, goos string) []CliStatus {
+	return InspectClisWithIgnore(clis, goos, nil)
+}
+
+// InspectClisWithIgnore checks every registered CLI and marks those listed in ignore.
+func InspectClisWithIgnore(clis config.ClisFile, goos string, ignore []string) []CliStatus {
 	names := sortedCliKeys(clis.Clis)
 	out := make([]CliStatus, 0, len(names))
 	for _, name := range names {
 		c := clis.Clis[name]
+		ignored := config.IsIgnored(ignore, "cli", name)
 		installed := true
-		if strings.TrimSpace(c.Check) != "" {
+		if !ignored && strings.TrimSpace(c.Check) != "" {
 			installed = VerifyCli(c.Check)
 		}
 		out = append(out, CliStatus{
-			Name:       name,
-			Installed:  installed,
-			Check:      strings.TrimSpace(c.Check),
-			InstallCmd: c.Install.ForOS(goos),
-			URL:        strings.TrimSpace(c.URL),
+			Name:         name,
+			Installed:    installed,
+			Ignored:      ignored,
+			Check:        strings.TrimSpace(c.Check),
+			InstallCmd:   c.Install.ForOS(goos),
+			UninstallCmd: c.Uninstall.ForOS(goos),
+			URL:          strings.TrimSpace(c.URL),
 		})
 	}
 	return out
@@ -46,7 +56,7 @@ func InspectClis(clis config.ClisFile, goos string) []CliStatus {
 func CheckClis(clis config.ClisFile) []string {
 	var missing []string
 	for _, st := range InspectClis(clis, runtime.GOOS) {
-		if !st.Installed {
+		if !st.Installed && !st.Ignored {
 			missing = append(missing, st.Name)
 		}
 	}
@@ -72,6 +82,25 @@ func InstallCli(item CliStatus, stdout, stderr io.Writer) error {
 		}
 		return fmt.Errorf("no install command configured for %s on %s", item.Name, runtime.GOOS)
 	}
+	if err := runShellCmd(cmdStr, stdout, stderr); err != nil {
+		return fmt.Errorf("install %s (%q): %w", item.Name, cmdStr, err)
+	}
+	return nil
+}
+
+// UninstallCli runs item's resolved uninstall command using the platform shell.
+func UninstallCli(item CliStatus, stdout, stderr io.Writer) error {
+	cmdStr := strings.TrimSpace(item.UninstallCmd)
+	if cmdStr == "" {
+		return fmt.Errorf("no uninstall command configured for %s on %s in clis/clis.yaml", item.Name, runtime.GOOS)
+	}
+	if err := runShellCmd(cmdStr, stdout, stderr); err != nil {
+		return fmt.Errorf("uninstall %s (%q): %w", item.Name, cmdStr, err)
+	}
+	return nil
+}
+
+func runShellCmd(cmdStr string, stdout, stderr io.Writer) error {
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		cmd = exec.Command("cmd", "/C", cmdStr)
@@ -80,10 +109,7 @@ func InstallCli(item CliStatus, stdout, stderr io.Writer) error {
 	}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("install %s (%q): %w", item.Name, cmdStr, err)
-	}
-	return nil
+	return cmd.Run()
 }
 
 func sortedCliKeys(m map[string]config.CliTool) []string {

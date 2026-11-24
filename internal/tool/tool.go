@@ -140,6 +140,17 @@ func hasBlock(path string) bool {
 	return ok
 }
 
+// ReplaceRulesBlock rewrites the managed rules block in path using res.Rules.
+// If res.Rules is empty, the managed block is stripped (deleting the file if empty).
+func ReplaceRulesBlock(path string, res Resources) error {
+	blk := rulesBlock(res)
+	if blk == "" {
+		_, err := stripBlock(path)
+		return err
+	}
+	return replaceBlock(path, blk)
+}
+
 // replaceBlock inserts or replaces the managed block in a markdown file.
 func replaceBlock(path, content string) error {
 	s, err := readString(path)

@@ -2,8 +2,6 @@
 
 **Make every team's AI setup shared and self-updating.** One git repo holds the team's skills, rules, MCP servers, CLI tools, custom IDE definitions, and hooks; `aiw` (`aiwarehouse`) distributes them into every member's AI tools and syncs local improvements back via pull requests.
 
-Go reimplementation of the ideas behind [teamai-cli](https://github.com/Tencent/teamai-cli), scoped to core sync.
-
 ## Quick start
 
 ```bash

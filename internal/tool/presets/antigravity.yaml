@@ -1,0 +1,34 @@
+id: antigravity
+detect:
+  - .agents
+  - ~/.gemini/config
+project:
+  skills: .agents/skills
+  rules:
+    mode: dir
+    path: .agents/rules
+    ext: .md
+  mcp:
+    path: .agents/mcp_config.json
+    format: json-standard
+    key: mcpServers
+  hooks:
+    path: .agents/hooks.json
+    key: hooks
+    event: sessionStart
+    style: flat
+user:
+  skills: ~/.gemini/config/skills
+  rules:
+    mode: dir
+    path: ~/.gemini/config/rules
+    ext: .md
+  mcp:
+    path: ~/.gemini/config/mcp_config.json
+    format: json-standard
+    key: mcpServers
+  hooks:
+    path: ~/.gemini/config/hooks.json
+    key: hooks
+    event: sessionStart
+    style: flat

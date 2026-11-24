@@ -7,10 +7,11 @@ import (
 )
 
 // TestUninstallHelpers runs a full install -> uninstall roundtrip for Cursor
-// using the cleanup helpers, asserting user content survives.
+// using UndoManaged, asserting user content survives.
 func TestUninstallHelpers(t *testing.T) {
-	c := &Cursor{Root: t.TempDir()}
-	os.MkdirAll(c.dir(), 0o755)
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, ".cursor"), 0o755)
+	c := adapterByID(t, root, "project", "cursor")
 	res := fixtureResources(t)
 	managed, err := c.Install(res)
 	if err != nil {
@@ -23,36 +24,28 @@ func TestUninstallHelpers(t *testing.T) {
 	managed = append(managed, hooks...)
 
 	// A foreign entry next to ours must survive uninstall.
-	mergeJSON(c.mcpPath(), func(m map[string]any) error {
+	mcpPath := filepath.Join(root, ".cursor", "mcp.json")
+	if err := mergeJSON(mcpPath, func(m map[string]any) error {
 		childMap(m, "mcpServers")["other"] = map[string]any{"command": "other"}
 		return nil
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	for _, e := range managed {
-		switch e.Kind {
-		case "file":
-			if err := os.RemoveAll(e.Path); err != nil {
-				t.Fatal(err)
-			}
-		case "hook":
-			if err := RemoveHookEntry(e.Path); err != nil {
-				t.Fatal(err)
-			}
-		case "mcp":
-			if err := RemoveServerKey(e.Path, e.Key); err != nil {
-				t.Fatal(err)
-			}
+		if _, err := UndoManaged(e, false); err != nil {
+			t.Fatal(err)
 		}
 	}
 
 	// Skill dir gone, hooks file deleted (only our entry), foreign server kept.
-	if _, err := os.Stat(filepath.Join(c.skills(), "go-tips")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(root, ".cursor", "skills", "go-tips")); !os.IsNotExist(err) {
 		t.Fatal("managed skill dir should be removed")
 	}
-	if _, err := os.Stat(c.hooksPath()); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(root, ".cursor", "hooks.json")); !os.IsNotExist(err) {
 		t.Fatal("hooks file with only our entry should be deleted")
 	}
-	m, err := readJSONMap(c.mcpPath())
+	m, err := readJSONMap(mcpPath)
 	if err != nil {
 		t.Fatal(err) // file kept because the foreign server survives
 	}
@@ -61,19 +54,44 @@ func TestUninstallHelpers(t *testing.T) {
 	}
 }
 
-func TestRemoveServerKeyTOML(t *testing.T) {
-	c := &Codex{Root: t.TempDir()}
-	os.MkdirAll(c.dir(), 0o755)
-	if err := os.WriteFile(c.tomlPath(), []byte("model = \"o4\"\n"), 0o644); err != nil {
+func TestRemoveHookEntryMatchesMovedBinary(t *testing.T) {
+	hooksPath := filepath.Join(t.TempDir(), "hooks.json")
+	if err := writeJSON(hooksPath, map[string]any{
+		"hooks": map[string]any{
+			"sessionStart": []any{
+				map[string]any{"command": `"/old/Cellar/aiw/0.1.0/bin/aiw" pull --quiet`},
+				map[string]any{"command": "echo keep-me"},
+			},
+		},
+	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := RemoveHookEntry(hooksPath); err != nil {
+		t.Fatal(err)
+	}
+	got := read(t, hooksPath)
+	if contains(got, "pull --quiet") || !contains(got, "keep-me") {
+		t.Fatalf("unexpected hooks.json after removal:\n%s", got)
+	}
+}
+
+func TestRemoveServerKeyTOML(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, ".codex"), 0o755)
+	tomlPath := filepath.Join(root, ".codex", "config.toml")
+	if err := os.WriteFile(tomlPath, []byte("model = \"o4\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := adapterByID(t, root, "project", "codex")
 	if _, err := c.Install(fixtureResources(t)); err != nil {
 		t.Fatal(err)
 	}
-	if err := RemoveServerKey(c.tomlPath(), "fs"); err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"fs", "search"} {
+		if err := RemoveServerKey(tomlPath, name); err != nil {
+			t.Fatal(err)
+		}
 	}
-	got := read(t, c.tomlPath())
+	got := read(t, tomlPath)
 	if contains(got, "npx") || contains(got, "mcp_servers") {
 		t.Fatalf("server not removed:\n%s", got)
 	}

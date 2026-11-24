@@ -3,6 +3,7 @@ package hub
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,10 +14,17 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
+func gitTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Cleanup(func() { _ = config.RemoveAll(dir) })
+	return dir
+}
+
 // initHub creates a local git repo seeded with a README, usable as origin.
 func initHub(t *testing.T) string {
 	t.Helper()
-	src := t.TempDir()
+	src := gitTempDir(t)
 	r, err := git.PlainInit(src, false)
 	if err != nil {
 		t.Fatal(err)
@@ -55,6 +63,7 @@ func (f *fakeRepo) OpenPR(branch, title string, reviewers []string) (string, err
 
 func pushFixture(t *testing.T) (origin string, projRoot string, pusher Pusher) {
 	t.Helper()
+	isolateHome(t)
 	// Origin hub with one skill.
 	origin = initHub(t)
 	skill := filepath.Join(origin, "skills", "existing")
@@ -66,7 +75,7 @@ func pushFixture(t *testing.T) (origin string, projRoot string, pusher Pusher) {
 	}
 	commitWorktree(t, origin, "add existing skill")
 
-	// A project with a new skill and an edited copy of the existing one.
+	// A project with a new skill, an edited copy, a rule, and a local MCP server with a secret env var.
 	projRoot = t.TempDir()
 	os.MkdirAll(filepath.Join(projRoot, ".cursor", "skills", "new-thing"), 0o755)
 	os.WriteFile(filepath.Join(projRoot, ".cursor", "skills", "new-thing", "SKILL.md"), []byte("new\n"), 0o644)
@@ -75,11 +84,21 @@ func pushFixture(t *testing.T) (origin string, projRoot string, pusher Pusher) {
 	rules := filepath.Join(projRoot, ".cursor", "rules")
 	os.MkdirAll(rules, 0o755)
 	os.WriteFile(filepath.Join(rules, "extra.mdc"), []byte("extra rule\n"), 0o644)
+	os.WriteFile(filepath.Join(projRoot, ".cursor", "mcp.json"), []byte(`{
+  "mcpServers": {
+    "local-mcp": {
+      "command": "npx",
+      "args": ["-y", "demo-mcp"],
+      "env": {"API_KEY": "super-secret"}
+    }
+  }
+}`), 0o644)
 
 	part := config.PartitionFor(projRoot)
 	if err := part.Ensure(); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = config.RemoveAll(part.Root) })
 	pusher = Pusher{
 		Root:      projRoot,
 		Partition: part,
@@ -135,44 +154,69 @@ func branchFile(t *testing.T, origin, branch, file string) string {
 	return b
 }
 
-func TestPushDryRun(t *testing.T) {
-	_, _, p := pushFixture(t)
+func TestPushDryRunAndRepeatedPushWindowsSafe(t *testing.T) {
+	origin, _, p := pushFixture(t)
 	report, err := p.Push(true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(report.Added) != 2 { // skill "new-thing" + rule "extra"
+	if len(report.Added) != 3 { // skill "new-thing" + rule "extra" + mcp "local-mcp"
 		t.Fatalf("added: %v", report.Added)
 	}
 	if len(report.Edited) != 1 || report.Edited[0] != "existing" {
 		t.Fatalf("edited: %v", report.Edited)
 	}
+	// Second push (real) must cleanly remove knowledge-wt even on Windows.
+	report2, err := p.Push(false)
+	if err != nil {
+		t.Fatalf("second push failed: %v", err)
+	}
+	if content := branchFile(t, origin, report2.Branch, "mcp/mcp.yaml"); strings.Contains(content, "super-secret") || !strings.Contains(content, "demo-mcp") {
+		t.Fatalf("mcp.yaml should contain server without secrets:\n%s", content)
+	}
 }
 
-func TestPushCreatesBranchAndPR(t *testing.T) {
-	origin, _, p := pushFixture(t) // (origin, projRoot, pusher)
-	fake := p.Repo.(*fakeRepo)
-	report, err := p.Push(false)
+func TestPushSelectiveFilter(t *testing.T) {
+	origin, _, p := pushFixture(t)
+	report, err := p.PushWithOptions(PushOptions{
+		Select: []string{"skill:new-thing"},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Branch != "aiw/Alice-Example" {
-		t.Fatalf("branch: %q", report.Branch)
-	}
-	if report.PRURL == "" || report.ReusedPR {
-		t.Fatalf("expected fresh PR, got %+v", report)
-	}
-	if len(fake.opened) != 1 || fake.opened[0] != report.Branch {
-		t.Fatalf("opened: %v", fake.opened)
+	if len(report.Added) != 1 || report.Added[0] != "new-thing" || len(report.Edited) != 0 {
+		t.Fatalf("selective report: %+v", report)
 	}
 	if content := branchFile(t, origin, report.Branch, "skills/new-thing/SKILL.md"); content != "new\n" {
-		t.Fatalf("pushed skill content: %q", content)
+		t.Fatalf("pushed skill: %q", content)
 	}
-	if content := branchFile(t, origin, report.Branch, "rules/extra.md"); content != "extra rule\n" {
-		t.Fatalf("pushed rule content: %q", content)
+	// Unselected edited skill must remain untouched in pushed branch.
+	if content := branchFile(t, origin, report.Branch, "skills/existing/SKILL.md"); content != "hub version\n" {
+		t.Fatalf("unselected skill was modified: %q", content)
 	}
-	if content := branchFile(t, origin, report.Branch, "skills/existing/SKILL.md"); content != "local edit\n" {
-		t.Fatalf("edited skill content: %q", content)
+}
+
+func TestPushMultiToolEditNotShadowed(t *testing.T) {
+	isolateHome(t)
+	origin := initHub(t)
+	skill := filepath.Join(origin, "skills", "shared")
+	os.MkdirAll(skill, 0o755)
+	os.WriteFile(filepath.Join(skill, "SKILL.md"), []byte("hub\n"), 0o644)
+	commitWorktree(t, origin, "add shared skill")
+
+	projRoot := t.TempDir()
+	// Cursor still has unmodified copy, while Antigravity (.agents) has an edited copy.
+	os.MkdirAll(filepath.Join(projRoot, ".cursor", "skills", "shared"), 0o755)
+	os.WriteFile(filepath.Join(projRoot, ".cursor", "skills", "shared", "SKILL.md"), []byte("hub\n"), 0o644)
+	os.MkdirAll(filepath.Join(projRoot, ".agents", "skills", "shared"), 0o755)
+	os.WriteFile(filepath.Join(projRoot, ".agents", "skills", "shared", "SKILL.md"), []byte("edited in antigravity\n"), 0o644)
+
+	items, err := DiffLocalItems(projRoot, "project", origin, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Name != "shared" || items[0].Status != "edited" || items[0].Source != "antigravity" {
+		t.Fatalf("expected edit from antigravity, got %+v", items)
 	}
 }
 
@@ -192,8 +236,29 @@ func TestPushReusesSameUserPR(t *testing.T) {
 	}
 }
 
+func TestAddCliToHub(t *testing.T) {
+	origin, _, p := pushFixture(t)
+	report, err := p.AddCli("hex", config.CliTool{
+		Check: "hex --version",
+		URL:   "https://hex.pm",
+		Install: config.CliInstall{
+			ByOS: map[string]string{"windows": "mix local.hex --force", "darwin": "mix local.hex --force"},
+		},
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Added) != 1 || report.Added[0] != "cli:hex" {
+		t.Fatalf("report: %+v", report)
+	}
+	yamlContent := branchFile(t, origin, report.Branch, "clis/clis.yaml")
+	if !strings.Contains(yamlContent, "hex:") || !strings.Contains(yamlContent, "https://hex.pm") {
+		t.Fatalf("clis.yaml content:\n%s", yamlContent)
+	}
+}
+
 func TestPushNothingNew(t *testing.T) {
-	// Hub already has the skill the project carries, with identical content.
+	isolateHome(t)
 	origin := initHub(t)
 	skill := filepath.Join(origin, "skills", "same")
 	os.MkdirAll(skill, 0o755)
@@ -207,6 +272,7 @@ func TestPushNothingNew(t *testing.T) {
 	if err := part.Ensure(); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = config.RemoveAll(part.Root) })
 	p := Pusher{
 		Root:      projRoot,
 		Partition: part,
@@ -228,6 +294,8 @@ func TestSanitize(t *testing.T) {
 		"  bob  ":        "bob",
 		"":               "unknown",
 		"joe":            "joe",
+		"..alice.lock.":  "alice",
+		"a..b":           "a-b",
 	}
 	for in, want := range cases {
 		if got := sanitize(in); got != want {

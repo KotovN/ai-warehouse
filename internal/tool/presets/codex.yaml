@@ -1,0 +1,32 @@
+id: codex
+detect:
+  - .codex
+  - ~/.codex
+project:
+  skills: .codex/skills
+  rules:
+    mode: block
+    path: AGENTS.md
+  mcp:
+    path: .codex/config.toml
+    format: toml
+    key: mcp_servers
+  hooks:
+    path: .codex/hooks.json
+    key: hooks
+    event: sessionStart
+    style: flat
+user:
+  skills: ~/.codex/skills
+  rules:
+    mode: block
+    path: ~/.codex/AGENTS.md
+  mcp:
+    path: ~/.codex/config.toml
+    format: toml
+    key: mcp_servers
+  hooks:
+    path: ~/.codex/hooks.json
+    key: hooks
+    event: sessionStart
+    style: flat

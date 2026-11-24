@@ -1,0 +1,19 @@
+id: cursor
+detect:
+  - .cursor
+  - ~/.cursor
+project:
+  skills: .cursor/skills
+  rules:
+    mode: dir
+    path: .cursor/rules
+    ext: .mdc
+  mcp:
+    path: .cursor/mcp.json
+    format: json-standard
+    key: mcpServers
+  hooks:
+    path: .cursor/hooks.json
+    key: hooks
+    event: sessionStart
+    style: flat

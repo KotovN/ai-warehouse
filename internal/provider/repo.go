@@ -10,14 +10,18 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
-	"time"
 )
+
+// ErrNotIntegrated is returned by non-API hosts (e.g. GenericGit) when PR or
+// repo API operations are requested after a git push has already succeeded.
+var ErrNotIntegrated = errors.New("this git host is not API-integrated: open the pull request by hand")
 
 // Repo syncs between a hub remote and its local clone.
 type Repo interface {
@@ -115,6 +119,15 @@ func UpdateClone(clonePath string) error {
 	return w.Reset(&git.ResetOptions{Mode: git.HardReset, Commit: ref.Hash()})
 }
 
+// RemoteURL returns the configured origin URL of a clone, or "".
+func RemoteURL(clonePath string) string {
+	r, err := git.PlainOpen(clonePath)
+	if err != nil {
+		return ""
+	}
+	return remoteOf(r)
+}
+
 // remoteOf returns the origin URL of a repo.
 func remoteOf(r *git.Repository) string {
 	rm, err := r.Remote("origin")
@@ -129,27 +142,43 @@ func remoteOf(r *git.Repository) string {
 }
 
 func (g GenericGit) OpenPR(branch, title string, reviewers []string) (string, error) {
-	return "", errors.New("this git host is not API-integrated: open the pull request by hand")
+	return "", ErrNotIntegrated
 }
 
 func (g GenericGit) ListOpenPRs() ([]PR, error) {
-	return nil, errors.New("this git host is not API-integrated: check pull requests on the host")
+	return nil, ErrNotIntegrated
 }
 
 // New returns the provider matching a remote URL; unknown hosts degrade to GenericGit.
 func New(remote string) (Repo, error) {
-	u, err := url.Parse(remote)
-	if err == nil && u.Host == "github.com" {
-		owner, name := splitOwnerName(u.Path)
+	if owner, name, ok := parseGitHubRemote(remote); ok {
+		tok := githubToken()
 		return &GitHub{
 			GenericGit: GenericGit{Remote: remote},
-			token:      githubToken(),
+			token:      tok,
 			owner:      owner,
 			name:       name,
-			api:        newGithubClient(githubToken(), ""),
+			api:        newGithubClient(tok, ""),
 		}, nil
 	}
 	return GenericGit{Remote: remote}, nil
+}
+
+// parseGitHubRemote recognizes HTTPS, SSH URL, and SCP-style GitHub remotes.
+func parseGitHubRemote(remote string) (owner, name string, ok bool) {
+	trimmed := strings.TrimSpace(remote)
+	// SCP-style: git@github.com:owner/repo(.git)
+	if strings.HasPrefix(strings.ToLower(trimmed), "git@github.com:") {
+		path := trimmed[len("git@github.com:"):]
+		owner, name = splitOwnerName(path)
+		return owner, name, owner != "" && name != ""
+	}
+	u, err := url.Parse(trimmed)
+	if err != nil || !strings.EqualFold(u.Hostname(), "github.com") {
+		return "", "", false
+	}
+	owner, name = splitOwnerName(u.Path)
+	return owner, name, owner != "" && name != ""
 }
 
 // CommitAll stages every change in the clone and commits it.
@@ -169,14 +198,18 @@ func CommitAll(clonePath, msg string) (plumbing.Hash, error) {
 	return w.Commit(msg, &git.CommitOptions{Author: &sig})
 }
 
-// signature uses git config identity when present, else a neutral fallback.
+// signature uses git config identity (local + global) when present, else a neutral fallback.
 func signature(r *git.Repository) object.Signature {
 	sig := object.Signature{When: time.Now()}
+	if cfg, err := r.ConfigScoped(config.GlobalScope); err == nil && cfg.User.Name != "" && cfg.User.Email != "" {
+		sig.Name, sig.Email = cfg.User.Name, cfg.User.Email
+		return sig
+	}
 	if cfg, err := r.Config(); err == nil && cfg.User.Name != "" && cfg.User.Email != "" {
 		sig.Name, sig.Email = cfg.User.Name, cfg.User.Email
-	} else {
-		sig.Name, sig.Email = "aiwarehouse", "aiwarehouse@localhost"
+		return sig
 	}
+	sig.Name, sig.Email = "aiwarehouse", "aiwarehouse@localhost"
 	return sig
 }
 
@@ -196,9 +229,11 @@ func CreateBranch(clonePath, branch string) error {
 	})
 }
 
-// authForRemote returns basic auth from the environment for https remotes.
+// authForRemote returns basic auth from GITHUB_TOKEN/GH_TOKEN strictly for
+// HTTPS github.com remotes so credentials are never sent to other hosts or over HTTP.
 func authForRemote(remote string) *http.BasicAuth {
-	if !strings.HasPrefix(remote, "http") {
+	u, err := url.Parse(strings.TrimSpace(remote))
+	if err != nil || !strings.EqualFold(u.Scheme, "https") || !strings.EqualFold(u.Hostname(), "github.com") {
 		return nil
 	}
 	if tok := githubToken(); tok != "" {
@@ -216,7 +251,11 @@ func githubToken() string {
 
 func splitOwnerName(path string) (string, string) {
 	p := strings.Trim(path, "/")
-	p = strings.TrimSuffix(p, ".git")
-	owner, name, _ := strings.Cut(p, "/")
+	parts := strings.Split(p, "/")
+	if len(parts) < 2 {
+		return "", ""
+	}
+	owner := parts[0]
+	name := strings.TrimSuffix(parts[1], ".git")
 	return owner, name
 }

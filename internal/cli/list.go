@@ -2,6 +2,11 @@ package cli
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
 
 	"github.com/KotovN/ai-warehouse/internal/config"
 	"github.com/KotovN/ai-warehouse/internal/hub"
@@ -18,23 +23,37 @@ func runList(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("unknown resource type %q, want one of: %v", filter, config.ResourceTypes)
 		}
 	}
-	part, root, err := projectPartition()
+	part, root, cfg, err := activeInstall()
 	if err != nil {
 		return err
 	}
-	for _, a := range tool.All(root) {
+	out := cmd.OutOrStdout()
+	adapters, err := tool.LoadAdapters(root, cfg.Scope, tool.DefaultExtraDirs(part.Repo)...)
+	if err != nil {
+		return err
+	}
+	for _, a := range adapters {
+		if !isToolSelected(cfg.Tools, a.ID()) {
+			continue
+		}
+		if len(cfg.Tools) == 0 && !a.Detect() {
+			continue
+		}
 		inv, err := a.Inventory()
 		if err != nil {
 			return fmt.Errorf("%s inventory: %w", a.ID(), err)
 		}
 		if filter == "" || filter == "skills" {
-			fmt.Printf("%-9s skills: %v\n", a.ID(), inv.Skills)
+			fmt.Fprintf(out, "%-12s skills: %v\n", a.ID(), inv.Skills)
+		}
+		if filter == "" || filter == "rules" {
+			fmt.Fprintf(out, "%-12s rules: %v\n", a.ID(), inv.Rules)
 		}
 		if filter == "" || filter == "mcp" {
-			fmt.Printf("%-9s mcp servers: %v\n", a.ID(), inv.Servers)
+			fmt.Fprintf(out, "%-12s mcp servers: %v\n", a.ID(), inv.Servers)
 		}
 		if filter == "" || filter == "hooks" {
-			fmt.Printf("%-9s session-start hook: %v\n", a.ID(), inv.HooksSet)
+			fmt.Fprintf(out, "%-12s session-start hook: %v\n", a.ID(), inv.HooksSet)
 		}
 	}
 	res, err := hub.BuildResources(part.Repo)
@@ -42,25 +61,42 @@ func runList(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if filter == "" || filter == "clis" {
-		fmt.Printf("%-9s missing clis: %v\n", "cli", hub.CheckClis(res.Clis))
+		statuses := hub.InspectClis(res.Clis, runtime.GOOS)
+		var missing []string
+		for _, s := range statuses {
+			if !s.Installed {
+				missing = append(missing, s.Name)
+			}
+		}
+		fmt.Fprintf(out, "%-12s missing clis: %v (%d total)\n", "cli", missing, len(statuses))
+	}
+	if filter == "" || filter == "docs" {
+		fmt.Fprintf(out, "%-12s hub docs: %v\n", "docs", listDocs(part.Repo))
 	}
 	return nil
 }
 
-// projectPartition locates the active install and returns its partition and install root.
-func projectPartition() (config.Partition, string, error) {
-	root := initRoot("project")
-	part := config.PartitionFor(root)
-	cfg, err := config.Load(part.Config)
+func isToolSelected(configured []string, id string) bool {
+	if len(configured) == 0 {
+		return true
+	}
+	for _, t := range configured {
+		if strings.EqualFold(strings.TrimSpace(t), id) {
+			return true
+		}
+	}
+	return false
+}
+
+func listDocs(repoPath string) []string {
+	entries, err := os.ReadDir(filepath.Join(repoPath, "docs"))
 	if err != nil {
-		return part, root, err
+		return nil
 	}
-	if cfg.Repo == "" {
-		return part, root, fmt.Errorf("not initialized: run aiwarehouse init <repo-url> first")
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
 	}
-	if cfg.Scope == "user" {
-		root = initRoot("user")
-		part = config.PartitionFor(root)
-	}
-	return part, root, nil
+	sort.Strings(names)
+	return names
 }

@@ -1,12 +1,22 @@
 package doctor
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/KotovN/ai-warehouse/internal/config"
 )
 
+func isolateHome(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+}
+
 func TestRunUninitialized(t *testing.T) {
+	isolateHome(t)
 	root := t.TempDir()
 	checks := Run(root, config.LocalConfig{}, config.PartitionFor(root))
 	byName := map[string]Check{}
@@ -21,10 +31,11 @@ func TestRunUninitialized(t *testing.T) {
 	}
 }
 
-func TestRunInitializedHealthy(t *testing.T) {
+func TestRunInitializedEmptyCloneDirFails(t *testing.T) {
+	isolateHome(t)
 	root := t.TempDir()
 	part := config.PartitionFor(root)
-	if err := part.Ensure(); err != nil {
+	if err := os.MkdirAll(part.Repo, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	cfg := config.LocalConfig{Repo: "https://github.com/org/repo", Scope: "project", ProjectRoot: root}
@@ -36,13 +47,33 @@ func TestRunInitializedHealthy(t *testing.T) {
 	if !names["config"].OK {
 		t.Fatalf("config check: %+v", names["config"])
 	}
-	// Clone dir exists but is empty — unreadable clone check should fire.
+	// Clone dir exists but is empty (not a git clone) — hub clone check must fail.
 	if names["hub clone"].OK {
-		t.Fatal("empty clone dir should not pass the hub clone check")
+		t.Fatal("empty non-git clone dir should not pass the hub clone check")
+	}
+}
+
+func TestRunRespectsToolsFilter(t *testing.T) {
+	isolateHome(t)
+	root := t.TempDir()
+	// Both cursor and codex exist, but user only configured cursor.
+	os.MkdirAll(filepath.Join(root, ".cursor"), 0o755)
+	os.MkdirAll(filepath.Join(root, ".codex"), 0o755)
+
+	part := config.PartitionFor(root)
+	os.MkdirAll(filepath.Join(part.Repo, ".git"), 0o755)
+	cfg := config.LocalConfig{Repo: "https://github.com/org/repo", Scope: "project", ProjectRoot: root, Tools: []string{"cursor"}}
+
+	checks := Run(root, cfg, part)
+	for _, c := range checks {
+		if c.Name == "codex" || c.Name == "codex hooks" {
+			t.Fatalf("excluded tool codex must not be checked, got %+v", c)
+		}
 	}
 }
 
 func TestJSONSerializable(t *testing.T) {
+	isolateHome(t)
 	root := t.TempDir()
 	checks := Run(root, config.LocalConfig{}, config.PartitionFor(root))
 	for _, c := range checks {
